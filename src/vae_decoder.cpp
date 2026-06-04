@@ -87,16 +87,23 @@ static ggml_tensor * load_vec(ggml_context * wctx,
 
 // Materialize all the queued weight permutations with manual byte copies.
 //
-// We tried using ggml_permute + ggml_cont to do the (Co, Ci, kH, kW) ->
-// (kW, kH, Ci, Co) reshape, but permute(3,2,1,0) on a contiguous (Co, Ci, kH, kW)
-// tensor produces a view with strides that read from random positions in the
-// source memory (the data is in (Co, Ci, kH, kW) row-major, but the permuted
-// view's element [kw, kh, ci, co] is at an offset that doesn't correspond to
-// any sensible value in the source). The manual byte-by-byte copy is the
-// only safe approach.
+// CRITICAL: ggml_conv_2d_direct has a non-obvious behavior. It reshapes the
+// kernel (KW, KH, IC, OC) to 2D (KW*KH*IC, OC) and then does a mul_mat where
+// the (KW*KH*IC) axis is the inner dim of the dot product. The mul_mat
+// implementation accesses this 2D matrix in COLUMN-MAJOR (i.e. as if the
+// outer axis were rows and the inner axis were columns, transposed from
+// the natural row-major storage). So the EFFECTIVE layout that the conv
+// reads is (OC, KW*KH*IC) row-major — NOT (KW*KH*IC, OC) as the
+// reshape suggests. We must permute the PyTorch weight data accordingly.
+//
+// The mapping: dst byte offset (oc*knl_n + (kw*KH+kh)*IC + ic)*4 holds
+// the PyTorch value [oc, ic, kh, kw].
 static void materialize_views(const bonsai::WeightsView & view) {
     for (const auto & L : view.linears) {
-        // src is (out, in) row-major, dst is (in, out) row-major (transpose)
+        // For linear weights: ggml_mul_mat (in attention block) is row-major
+        // with the inner dim being ne0. The weight is stored with ne=(in, out),
+        // and the matmul does (in, seq) @ (in, out)^T = (out, seq). So
+        // PyTorch (out, in) row-major must become ggml (in, out) row-major.
         float * dp = ggml_get_data_f32(L.dst);
         for (int64_t o = 0; o < L.out_dim; ++o) {
             for (int64_t i = 0; i < L.in_dim; ++i) {
@@ -105,16 +112,24 @@ static void materialize_views(const bonsai::WeightsView & view) {
         }
     }
     for (const auto & C : view.convs) {
-        // src is (Co, Ci, kH, kW) PyTorch row-major
-        // dst is (kW, kH, Ci, Co) ggml row-major
-        // dst[kw, kh, ci, co] = src[co, ci, kh, kw]
+        // dst has ne=(KW, KH, IC, OC). The conv2d_direct reads it as a 2D
+        // matrix with the inner dim being the FLATTENED (KW, KH, IC) axis
+        // and the outer dim being OC, but accessed in COLUMN-MAJOR order.
+        //
+        // dst byte offset for the element logically at (kw, kh, ic, oc):
+        //   (oc * (KW*KH*IC) + (kw*KH + kh)*IC + ic) * 4
+        // = (oc * knl_n + (kw*KH+kh)*IC + ic) * 4
+        //
+        // PyTorch source offset for [oc, ic, kh, kw]:
+        //   (oc * Ci*kH*kW + ic * kH*kW + kh * kW + kw) * 4
         float * dp = ggml_get_data_f32(C.dst);
-        for (int64_t co = 0; co < C.out_c; ++co) {
-            for (int64_t ci = 0; ci < C.in_c; ++ci) {
+        int64_t knl_n = C.kw * C.kh * C.in_c;
+        for (int64_t oc = 0; oc < C.out_c; ++oc) {
+            for (int64_t ic = 0; ic < C.in_c; ++ic) {
                 for (int64_t kh = 0; kh < C.kh; ++kh) {
                     for (int64_t kw = 0; kw < C.kw; ++kw) {
-                        int64_t s = ((co * C.in_c + ci) * C.kh + kh) * C.kw + kw;
-                        int64_t d = ((kw * C.kh + kh) * C.in_c + ci) * C.out_c + co;
+                        int64_t s = ((oc * C.in_c + ic) * C.kh + kh) * C.kw + kw;
+                        int64_t d = oc * knl_n + (kw * C.kh + kh) * C.in_c + ic;
                         dp[d] = C.src[s];
                     }
                 }
