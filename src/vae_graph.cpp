@@ -51,7 +51,7 @@ static ggml_tensor * build_resnet(ggml_context * ctx, ggml_tensor * x, const Res
     n1 = ggml_silu(ctx, n1);
 
     // conv1: 3x3, padding 1
-    ggml_tensor * c1 = ggml_conv_2d(ctx, r.conv1.w, n1, 1, 1, 1, 1, 1, 1);
+    ggml_tensor * c1 = ggml_conv_2d_direct(ctx, r.conv1.w, n1, 1, 1, 1, 1, 1, 1);
     c1 = ggml_add(ctx, c1, channel_1d(ctx, r.conv1.b));
 
     // norm2
@@ -61,12 +61,12 @@ static ggml_tensor * build_resnet(ggml_context * ctx, ggml_tensor * x, const Res
     n2 = ggml_silu(ctx, n2);
 
     // conv2: 3x3, padding 1
-    ggml_tensor * c2 = ggml_conv_2d(ctx, r.conv2.w, n2, 1, 1, 1, 1, 1, 1);
+    ggml_tensor * c2 = ggml_conv_2d_direct(ctx, r.conv2.w, n2, 1, 1, 1, 1, 1, 1);
     c2 = ggml_add(ctx, c2, channel_1d(ctx, r.conv2.b));
 
     // shortcut
     if (r.conv_shortcut.w != nullptr) {
-        h = ggml_conv_2d(ctx, r.conv_shortcut.w, h, 1, 1, 0, 0, 1, 1);
+        h = ggml_conv_2d_direct(ctx, r.conv_shortcut.w, h, 1, 1, 0, 0, 1, 1);
         h = ggml_add(ctx, h, channel_1d(ctx, r.conv_shortcut.b));
     }
 
@@ -145,11 +145,11 @@ static ggml_tensor * build_attention(ggml_context * ctx, ggml_tensor * x, const 
 // returns: output RGB image in NCHW (ggml: [W, H, 3, 1]) with values in [0, 1]
 ggml_tensor * build_decoder_graph(ggml_context * ctx, const VAEWeights & w, ggml_tensor * x) {
     // post_quant_conv: 1x1, 32 -> 32
-    ggml_tensor * h = ggml_conv_2d(ctx, w.post_quant_conv.w, x, 1, 1, 0, 0, 1, 1);
+    ggml_tensor * h = ggml_conv_2d_direct(ctx, w.post_quant_conv.w, x, 1, 1, 0, 0, 1, 1);
     h = ggml_add(ctx, h, channel_1d(ctx, w.post_quant_conv.b));
 
     // conv_in: 3x3, 32 -> 512, padding 1
-    h = ggml_conv_2d(ctx, w.conv_in.w, h, 1, 1, 1, 1, 1, 1);
+    h = ggml_conv_2d_direct(ctx, w.conv_in.w, h, 1, 1, 1, 1, 1, 1);
     h = ggml_add(ctx, h, channel_1d(ctx, w.conv_in.b));
 
     // mid_block
@@ -165,7 +165,7 @@ ggml_tensor * build_decoder_graph(ggml_context * ctx, const VAEWeights & w, ggml
         }
         if (ub.has_upsampler) {
             h = ggml_upscale(ctx, h, 2, GGML_SCALE_MODE_NEAREST);
-            h = ggml_conv_2d(ctx, ub.upsampler_conv.w, h, 1, 1, 1, 1, 1, 1);
+            h = ggml_conv_2d_direct(ctx, ub.upsampler_conv.w, h, 1, 1, 1, 1, 1, 1);
             h = ggml_add(ctx, h, channel_1d(ctx, ub.upsampler_conv.b));
         }
     }
@@ -177,7 +177,7 @@ ggml_tensor * build_decoder_graph(ggml_context * ctx, const VAEWeights & w, ggml
     h = ggml_silu(ctx, h);
 
     // conv_out: 3x3, 128 -> 3
-    h = ggml_conv_2d(ctx, w.conv_out.w, h, 1, 1, 1, 1, 1, 1);
+    h = ggml_conv_2d_direct(ctx, w.conv_out.w, h, 1, 1, 1, 1, 1, 1);
     h = ggml_add(ctx, h, channel_1d(ctx, w.conv_out.b));
 
     // clamp to [0, 1]

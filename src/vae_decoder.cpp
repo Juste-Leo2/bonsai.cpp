@@ -1,6 +1,7 @@
 #include "ggml.h"
 #include "ggml-cpu.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -26,12 +27,11 @@ namespace {
 void log_info(const std::string & msg) { std::cout << "[INFO] " << msg << std::endl; }
 void log_err (const std::string & msg) { std::cerr << "[ERROR] " << msg << std::endl; }
 
-// Decode a linear weight from PyTorch layout (out, in) into a ggml tensor
-// stored as (ne0=in, ne1=out).
-// Returns the destination ggml_tensor* (already in the weight context).
-ggml_tensor * load_linear_w(ggml_context * wctx,
-                            bonsai::WeightsView & view,
-                            const bonsai::SafeTensor & t) {
+// Load a linear weight from PyTorch layout (out, in) into a ggml tensor
+// in PyTorch layout (in, out) [renamed to ggml shape (ne0=in, ne1=out)].
+static ggml_tensor * load_linear_w(ggml_context * wctx,
+                                   bonsai::WeightsView & view,
+                                   const bonsai::SafeTensor & t) {
     if (t.shape.size() != 2) {
         throw std::runtime_error("expected 2D linear weight: " + t.name);
     }
@@ -47,11 +47,13 @@ ggml_tensor * load_linear_w(ggml_context * wctx,
     return dst;
 }
 
-// Decode a 4D conv weight from PyTorch layout (Co, Ci, kH, kW) into a ggml
-// tensor stored as (ne0=kW, ne1=kH, ne2=Ci, ne3=Co).
-ggml_tensor * load_conv_w(ggml_context * wctx,
-                          bonsai::WeightsView & view,
-                          const bonsai::SafeTensor & t) {
+// Load a 4D conv weight, stored in PyTorch (Co, Ci, kH, kW) row-major order.
+// We allocate with the ggml *kernel* shape (kW, kH, Ci, Co) but the data
+// is initially copied in PyTorch order. materialize_views fixes the layout
+// via ggml permute + cont.
+static ggml_tensor * load_conv_w(ggml_context * wctx,
+                                 bonsai::WeightsView & view,
+                                 const bonsai::SafeTensor & t) {
     if (t.shape.size() != 4) {
         throw std::runtime_error("expected 4D conv weight: " + t.name);
     }
@@ -68,10 +70,9 @@ ggml_tensor * load_conv_w(ggml_context * wctx,
     return dst;
 }
 
-// Decode a 1D weight or bias (no permutation)
-ggml_tensor * load_vec(ggml_context * wctx,
-                       bonsai::WeightsView & view,
-                       const bonsai::SafeTensor & t) {
+static ggml_tensor * load_vec(ggml_context * wctx,
+                              bonsai::WeightsView & view,
+                              const bonsai::SafeTensor & t) {
     if (t.shape.size() != 1) {
         throw std::runtime_error("expected 1D tensor: " + t.name);
     }
@@ -84,34 +85,44 @@ ggml_tensor * load_vec(ggml_context * wctx,
     return dst;
 }
 
-// Materialize all the queued permutations: copy from src to dst in ggml layout.
-void materialize_views(const bonsai::WeightsView & view) {
+// Materialize all the queued weight permutations using ggml ops.
+//
+// For linear weights: src is stored with ne=(in, out) but data in PyTorch
+// order (out, in) row-major. We permute the dimensions to (out, in), so the
+// data becomes contiguous in the new shape. Then we transpose back to
+// (in, out) and cont to materialize the data in ggml order.
+//
+// For conv weights: src is stored with ne=(kW, kH, Ci, Co) but data in
+// PyTorch (Co, Ci, kH, kW) row-major. We chain two permutes to get from
+// (kW, kH, Ci, Co) -> (Co, Ci, kH, kW) (data is now contiguous in this
+// shape since the underlying memory matches) -> (kW, kH, Ci, Co) (data
+// reordered to ggml row-major via cont).
+static void materialize_views(const bonsai::WeightsView & view,
+                             ggml_context * mctx) {
     for (const auto & L : view.linears) {
-        // src is (out, in) row-major, dst is (in, out) row-major
-        // We need to transpose.
-        float * dp = ggml_get_data_f32(L.dst);
-        for (int64_t o = 0; o < L.out_dim; ++o) {
-            for (int64_t i = 0; i < L.in_dim; ++i) {
-                dp[i * L.out_dim + o] = L.src[o * L.in_dim + i];
-            }
-        }
+        ggml_tensor * src = ggml_new_tensor_2d(mctx, GGML_TYPE_F32, L.in_dim, L.out_dim);
+        std::memcpy(ggml_get_data_f32(src), L.src, L.in_dim * L.out_dim * sizeof(float));
+        // permute (1, 0): (in, out) -> (out, in). Data is now in (out, in) row-major
+        ggml_tensor * t1 = ggml_permute(mctx, src, 1, 0, 2, 3);
+        // cont to materialize
+        ggml_tensor * t2 = ggml_cont(mctx, t1);
+        // transpose back: (out, in) -> (in, out). Data is now in (in, out) row-major
+        ggml_tensor * t3 = ggml_cont(mctx, ggml_transpose(mctx, t2));
+        std::memcpy(ggml_get_data_f32(L.dst), ggml_get_data_f32(t3),
+                    L.in_dim * L.out_dim * sizeof(float));
     }
     for (const auto & C : view.convs) {
-        // src is (Co, Ci, kH, kW) row-major
-        // dst is (kW, kH, Ci, Co) row-major
-        // src[co, ci, kh, kw] -> dst[kw, kh, ci, co]
-        float * dp = ggml_get_data_f32(C.dst);
-        for (int64_t co = 0; co < C.out_c; ++co) {
-            for (int64_t ci = 0; ci < C.in_c; ++ci) {
-                for (int64_t kh = 0; kh < C.kh; ++kh) {
-                    for (int64_t kw = 0; kw < C.kw; ++kw) {
-                        int64_t src_idx = ((co * C.in_c + ci) * C.kh + kh) * C.kw + kw;
-                        int64_t dst_idx = ((kw * C.kh + kh) * C.in_c + ci) * C.out_c + co;
-                        dp[dst_idx] = C.src[src_idx];
-                    }
-                }
-            }
-        }
+        ggml_tensor * src = ggml_new_tensor_4d(mctx, GGML_TYPE_F32, C.kw, C.kh, C.in_c, C.out_c);
+        std::memcpy(ggml_get_data_f32(src), C.src,
+                    C.kw * C.kh * C.in_c * C.out_c * sizeof(float));
+        // Permute: (kW, kH, Ci, Co) -> (Co, Ci, kH, kW). The data was in PyTorch
+        // (Co, Ci, kH, kW) order in src's memory, so under the new ne the data
+        // is now contiguous. cont is a no-op but safe.
+        ggml_tensor * t1 = ggml_cont(mctx, ggml_permute(mctx, src, 3, 2, 1, 0));
+        // Permute back: (Co, Ci, kH, kW) -> (kW, kH, Ci, Co). cont reorders bytes.
+        ggml_tensor * t2 = ggml_cont(mctx, ggml_permute(mctx, t1, 3, 2, 1, 0));
+        std::memcpy(ggml_get_data_f32(C.dst), ggml_get_data_f32(t2),
+                    C.kw * C.kh * C.in_c * C.out_c * sizeof(float));
     }
     for (const auto & V : view.vecs) {
         std::memcpy(ggml_get_data_f32(V.dst), V.src, V.n * sizeof(float));
@@ -196,7 +207,6 @@ bonsai::UpBlock load_up_block(ggml_context * wctx, bonsai::WeightsView & view,
                               const std::string & prefix, bool has_upsampler) {
     bonsai::UpBlock u;
     for (int i = 0; i < 3; ++i) {
-        // First resnet of up_blocks.2 and .3 has conv_shortcut
         bool shortcut = (i == 0) &&
             (prefix == "decoder.up_blocks.2" || prefix == "decoder.up_blocks.3");
         u.resnets.push_back(load_resnet(wctx, view, st, prefix + ".resnets." + std::to_string(i), shortcut));
@@ -208,8 +218,8 @@ bonsai::UpBlock load_up_block(ggml_context * wctx, bonsai::WeightsView & view,
     return u;
 }
 
-bonsai::VAEWeights load_vae_weights(ggml_context * wctx, bonsai::SafetensorsFile & st) {
-    bonsai::WeightsView view;
+bonsai::VAEWeights load_vae_weights(ggml_context * wctx, bonsai::SafetensorsFile & st,
+                                    bonsai::WeightsView & view) {
     bonsai::VAEWeights W;
 
     log_info("loading post_quant_conv...");
@@ -242,9 +252,6 @@ bonsai::VAEWeights load_vae_weights(ggml_context * wctx, bonsai::SafetensorsFile
     log_info("loading conv_out...");
     W.conv_out = load_conv2d(wctx, view, st, "decoder.conv_out");
 
-    log_info("materializing weight permutations...");
-    materialize_views(view);
-
     return W;
 }
 
@@ -257,8 +264,6 @@ void write_png(const std::string & path, int w, int h, const uint8_t * rgb) {
     }
 }
 
-// Convert a CHW float tensor in [0, 1] to an HWC uint8 RGB buffer.
-// Tensor layout (ggml): ne[0]=W, ne[1]=H, ne[2]=3, ne[3]=1
 void chw_f32_to_hwc_u8(const float * src, uint8_t * dst, int W, int H) {
     for (int y = 0; y < H; ++y) {
         for (int x = 0; x < W; ++x) {
@@ -280,8 +285,8 @@ int main(int argc, char ** argv) {
     std::string model_path = "models/flux2-vae.safetensors";
     std::string latent_path;
     std::string output_path = "out.png";
-    int latent_h = 32;
-    int latent_w = 32;
+    int latent_h = 16;
+    int latent_w = 16;
     int n_threads = 4;
 
     for (int i = 1; i < argc; ++i) {
@@ -295,11 +300,14 @@ int main(int argc, char ** argv) {
         else if (a == "--help" || a == "-h") {
             std::cout << "Usage: " << argv[0] << " [options]\n"
                       << "  --model <path>     path to flux2-vae.safetensors (default: models/flux2-vae.safetensors)\n"
-                      << "  --latent <path>    path to input latent .bin file (BCHW F32, default: synthetic noise)\n"
+                      << "  --latent <path>    path to input latent .bin file (default: synthetic noise)\n"
                       << "  --output <path>    output PNG (default: out.png)\n"
-                      << "  --H <int>          latent height (default: 32)\n"
-                      << "  --W <int>          latent width  (default: 32)\n"
-                      << "  --threads <int>    ggml threads (default: 4)\n";
+                      << "  --H <int>          ENCODED latent height in (B,128,H,W) format (default: 16, output 256x256)\n"
+                      << "  --W <int>          ENCODED latent width  in (B,128,H,W) format (default: 16, output 256x256)\n"
+                      << "  --threads <int>    ggml threads (default: 4)\n"
+                      << "\n"
+                      << "Latent format: raw BCHW F32 with 128 channels (= 32 * 2*2 spatial tile).\n"
+                      << "The decoder applies inv_normalize (BN) + 2x2 spatial tile + 8x decode.\n";
             return 0;
         }
     }
@@ -321,8 +329,7 @@ int main(int argc, char ** argv) {
     }
     log_info("loaded " + std::to_string(st.tensors().size()) + " tensor entries");
 
-    // --- Build weights context (allocates tensor storage, copies data) ---
-    // Estimate weight memory: 336 MB for the full model
+    // --- Weights context (final, contiguous) ---
     size_t wctx_size = 400 * 1024 * 1024;
     ggml_init_params wparams{ wctx_size, nullptr, false };
     ggml_context * wctx = ggml_init(wparams);
@@ -331,20 +338,70 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    bonsai::VAEWeights W;
-    try {
-        W = load_vae_weights(wctx, st);
-    } catch (const std::exception & e) {
-        log_err(std::string("loading failed: ") + e.what());
+    // --- Scratch context for weight permutation ---
+    // 2 GB scratch — the cont ops after permutes allocate same-size copies.
+    size_t mctx_size = 2ULL * 1024 * 1024 * 1024;
+    void * mctx_buf = mmap(nullptr, mctx_size, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (mctx_buf == MAP_FAILED) {
+        log_err("failed to mmap scratch context");
         ggml_free(wctx);
         return 1;
     }
+    ggml_init_params mparams{ mctx_size, mctx_buf, false };
+    ggml_context * mctx = ggml_init(mparams);
+    if (!mctx) {
+        log_err("failed to allocate scratch context");
+        munmap(mctx_buf, mctx_size);
+        ggml_free(wctx);
+        return 1;
+    }
+
+    bonsai::WeightsView view;
+    bonsai::VAEWeights W;
+    try {
+        W = load_vae_weights(wctx, st, view);
+    } catch (const std::exception & e) {
+        log_err(std::string("loading failed: ") + e.what());
+        ggml_free(mctx);
+        ggml_free(wctx);
+        return 1;
+    }
+
+    log_info("materializing weight permutations...");
+    materialize_views(view, mctx);
+    ggml_free(mctx);
+    munmap(mctx_buf, mctx_size);
     log_info("all weights loaded into ggml");
 
-    // --- Load or synthesize latent ---
-    const int latent_channels = 32;
-    int latent_size = 1 * latent_channels * latent_h * latent_w;
-    std::vector<float> latent((size_t) latent_size, 0.0f);
+    // --- Load BN params ---
+    std::vector<float> bn_mean(128), bn_inv_std(128);
+    {
+        const auto * m = st.find("bn.running_mean");
+        const auto * v = st.find("bn.running_var");
+        if (!m || !v) {
+            log_err("missing bn.running_mean / bn.running_var");
+            ggml_free(wctx);
+            return 1;
+        }
+        if (m->shape[0] != 128) {
+            log_err("BN params must be 128 ch, got " + std::to_string(m->shape[0]));
+            ggml_free(wctx);
+            return 1;
+        }
+        const float * mp = reinterpret_cast<const float *>(m->data);
+        const float * vp = reinterpret_cast<const float *>(v->data);
+        for (int i = 0; i < 128; ++i) {
+            bn_mean[i] = mp[i];
+            bn_inv_std[i] = std::sqrt(vp[i] + 1e-4f);
+        }
+        log_info("loaded bn.running_mean / bn.running_var (128 ch)");
+    }
+
+    // --- Load or synthesize encoded latent ---
+    const int encoded_channels = 128;
+    int encoded_size = encoded_channels * latent_h * latent_w;
+    std::vector<float> latent((size_t) encoded_size, 0.0f);
 
     if (!latent_path.empty()) {
         log_info("loading latent from " + latent_path);
@@ -354,32 +411,55 @@ int main(int argc, char ** argv) {
             ggml_free(wctx);
             return 1;
         }
-        f.read(reinterpret_cast<char *>(latent.data()), latent_size * sizeof(float));
-        if (f.gcount() != (std::streamsize)(latent_size * sizeof(float))) {
-            log_err("latent file too small (expected " +
-                    std::to_string(latent_size * sizeof(float)) + " bytes)");
+        f.read(reinterpret_cast<char *>(latent.data()), encoded_size * sizeof(float));
+        if (f.gcount() != (std::streamsize)(encoded_size * sizeof(float))) {
+            log_err("latent file too small");
             ggml_free(wctx);
             return 1;
         }
     } else {
         log_info("synthesizing random latent (seed 42)");
-        // simple LCG so output is deterministic
         uint32_t seed = 42;
         for (auto & v : latent) {
             seed = seed * 1664525u + 1013904223u;
-            v = ((float)(seed & 0xFFFF) / 32768.0f) - 1.0f;  // [-1, 1]
+            v = ((float)(seed & 0xFFFF) / 32768.0f) - 1.0f;
         }
     }
 
+    // --- Preprocess: inv_normalize + 2x2 spatial tile ---
+    const int post_channels = 32;
+    const int post_h = 2 * latent_h;
+    const int post_w = 2 * latent_w;
+    int post_size = post_channels * post_h * post_w;
+    std::vector<float> post((size_t) post_size, 0.0f);
+    {
+        const float * src = latent.data();
+        for (int c = 0; c < 32; ++c) {
+            for (int i = 0; i < latent_h; ++i) {
+                for (int j = 0; j < latent_w; ++j) {
+                    for (int di = 0; di < 2; ++di) {
+                        for (int dj = 0; dj < 2; ++dj) {
+                            int sc = c * 4 + di * 2 + dj;
+                            int64_t sidx = (int64_t)sc * latent_h * latent_w + (int64_t)i * latent_w + j;
+                            float v = src[sidx] * bn_inv_std[sc] + bn_mean[sc];
+                            int64_t didx = (int64_t)c * post_h * post_w + (int64_t)(2*i + di) * post_w + (2*j + dj);
+                            post[didx] = v;
+                        }
+                    }
+                }
+            }
+        }
+        log_info("preprocessed: (B,128," + std::to_string(latent_h) + "," +
+                 std::to_string(latent_w) + ") -> (B,32," + std::to_string(post_h) +
+                 "," + std::to_string(post_w) + ")");
+    }
+
     // --- Build activations context ---
-    // Memory budget: ~16 GB virtual (mmap'd, so the OS only commits pages we
-    // actually touch). The decoder accumulates many intermediate tensors,
-    // and im2col temps for a 256x256 latent can be 600+ MB each.
     size_t actx_size = 16ULL * 1024 * 1024 * 1024;
     void * actx_buf = mmap(nullptr, actx_size, PROT_READ | PROT_WRITE,
                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (actx_buf == MAP_FAILED) {
-        log_err("failed to mmap activations context buffer");
+        log_err("failed to mmap activations context");
         ggml_free(wctx);
         return 1;
     }
@@ -387,17 +467,18 @@ int main(int argc, char ** argv) {
     ggml_context * actx = ggml_init(aparams);
     if (!actx) {
         log_err("failed to allocate activations context");
+        munmap(actx_buf, actx_size);
         ggml_free(wctx);
         return 1;
     }
 
-    // Input latent tensor: ggml layout (W, H, C, N)
+    // Input latent (post-BN, post-rearrange) ggml layout: (W, H, C, N)
     ggml_tensor * x = ggml_new_tensor_4d(actx, GGML_TYPE_F32,
-                                         (int64_t) latent_w,
-                                         (int64_t) latent_h,
-                                         (int64_t) latent_channels,
+                                         (int64_t) post_w,
+                                         (int64_t) post_h,
+                                         (int64_t) post_channels,
                                          1);
-    std::memcpy(ggml_get_data_f32(x), latent.data(), latent_size * sizeof(float));
+    std::memcpy(ggml_get_data_f32(x), post.data(), post.size() * sizeof(float));
 
     // Build the decoder graph
     log_info("building decoder graph...");
@@ -411,13 +492,12 @@ int main(int argc, char ** argv) {
     log_info("activation memory: " +
              std::to_string(ggml_used_mem(actx) / (1024 * 1024)) + " MB");
 
-    // --- Execute ---
     log_info("running graph on CPU (" + std::to_string(n_threads) + " threads)...");
     auto t0 = std::chrono::high_resolution_clock::now();
     ggml_status st_g = ggml_graph_compute_with_ctx(actx, gf, n_threads);
     auto t1 = std::chrono::high_resolution_clock::now();
     if (st_g != GGML_STATUS_SUCCESS) {
-        log_err("graph compute failed with status " + std::to_string((int)st_g));
+        log_err("graph compute failed");
         ggml_free(actx);
         ggml_free(wctx);
         return 1;
@@ -425,7 +505,6 @@ int main(int argc, char ** argv) {
     double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     log_info("done in " + std::to_string((int) ms) + " ms");
 
-    // --- Read back output ---
     int out_h = (int) out->ne[1];
     int out_w = (int) out->ne[0];
     int out_c = (int) out->ne[2];
@@ -433,16 +512,16 @@ int main(int argc, char ** argv) {
              "x" + std::to_string(out_c));
 
     if (out_c != 3) {
-        log_err("expected 3 output channels, got " + std::to_string(out_c));
+        log_err("expected 3 output channels");
         ggml_free(actx);
         ggml_free(wctx);
+        munmap(actx_buf, actx_size);
         return 1;
     }
 
     std::vector<float> out_data((size_t)(out_h * out_w * out_c));
     std::memcpy(out_data.data(), ggml_get_data_f32(out), out_data.size() * sizeof(float));
 
-    // Convert to HWC uint8 and write PNG
     std::vector<uint8_t> rgb((size_t)(out_h * out_w * 3));
     chw_f32_to_hwc_u8(out_data.data(), rgb.data(), out_w, out_h);
     write_png(output_path, out_w, out_h, rgb.data());

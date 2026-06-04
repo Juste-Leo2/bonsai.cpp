@@ -49,3 +49,36 @@ target_include_directories(bonsai_vae PRIVATE
 )
 
 install(TARGETS bonsai_vae RUNTIME DESTINATION bin)
+
+# --- bonsai_vae_trim: trimmed decoder for debugging intermediate tensors ---
+add_executable(bonsai_vae_trim
+    src/vae_trim.cpp
+)
+
+target_link_libraries(bonsai_vae_trim PRIVATE ggml ggml-cpu)
+target_include_directories(bonsai_vae_trim PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+)
+
+# --- bonsai_vae_convin_check: compare conv_in output vs PyTorch reference ---
+add_executable(bonsai_vae_convin_check
+    src/vae_convin_check.cpp
+)
+
+target_link_libraries(bonsai_vae_convin_check PRIVATE ggml ggml-cpu)
+target_include_directories(bonsai_vae_convin_check PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+)
+
+# --- bonsai_permute_test: verify conv weight permute against PyTorch ---
+add_executable(bonsai_permute_test
+    src/permute_test.cpp
+)
+
+target_link_libraries(bonsai_permute_test PRIVATE ggml ggml-cpu)
+target_include_directories(bonsai_permute_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+)

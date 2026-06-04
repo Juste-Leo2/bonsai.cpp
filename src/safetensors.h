@@ -68,11 +68,11 @@ public:
             throw std::runtime_error("invalid header length");
         }
 
+        data_start_ = 8 + header_len;  // MUST be set before parse_header reads it
+
         const char * json_begin = reinterpret_cast<const char *>(mapped_ + 8);
         std::string header(json_begin, json_begin + header_len);
         parse_header(header);
-
-        data_start_ = 8 + header_len;
     }
 
     const std::unordered_map<std::string, SafeTensor> & tensors() const { return tensors_; }
