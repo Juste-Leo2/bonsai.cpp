@@ -85,44 +85,41 @@ static ggml_tensor * load_vec(ggml_context * wctx,
     return dst;
 }
 
-// Materialize all the queued weight permutations using ggml ops.
+// Materialize all the queued weight permutations with manual byte copies.
 //
-// For linear weights: src is stored with ne=(in, out) but data in PyTorch
-// order (out, in) row-major. We permute the dimensions to (out, in), so the
-// data becomes contiguous in the new shape. Then we transpose back to
-// (in, out) and cont to materialize the data in ggml order.
-//
-// For conv weights: src is stored with ne=(kW, kH, Ci, Co) but data in
-// PyTorch (Co, Ci, kH, kW) row-major. We chain two permutes to get from
-// (kW, kH, Ci, Co) -> (Co, Ci, kH, kW) (data is now contiguous in this
-// shape since the underlying memory matches) -> (kW, kH, Ci, Co) (data
-// reordered to ggml row-major via cont).
-static void materialize_views(const bonsai::WeightsView & view,
-                             ggml_context * mctx) {
+// We tried using ggml_permute + ggml_cont to do the (Co, Ci, kH, kW) ->
+// (kW, kH, Ci, Co) reshape, but permute(3,2,1,0) on a contiguous (Co, Ci, kH, kW)
+// tensor produces a view with strides that read from random positions in the
+// source memory (the data is in (Co, Ci, kH, kW) row-major, but the permuted
+// view's element [kw, kh, ci, co] is at an offset that doesn't correspond to
+// any sensible value in the source). The manual byte-by-byte copy is the
+// only safe approach.
+static void materialize_views(const bonsai::WeightsView & view) {
     for (const auto & L : view.linears) {
-        ggml_tensor * src = ggml_new_tensor_2d(mctx, GGML_TYPE_F32, L.in_dim, L.out_dim);
-        std::memcpy(ggml_get_data_f32(src), L.src, L.in_dim * L.out_dim * sizeof(float));
-        // permute (1, 0): (in, out) -> (out, in). Data is now in (out, in) row-major
-        ggml_tensor * t1 = ggml_permute(mctx, src, 1, 0, 2, 3);
-        // cont to materialize
-        ggml_tensor * t2 = ggml_cont(mctx, t1);
-        // transpose back: (out, in) -> (in, out). Data is now in (in, out) row-major
-        ggml_tensor * t3 = ggml_cont(mctx, ggml_transpose(mctx, t2));
-        std::memcpy(ggml_get_data_f32(L.dst), ggml_get_data_f32(t3),
-                    L.in_dim * L.out_dim * sizeof(float));
+        // src is (out, in) row-major, dst is (in, out) row-major (transpose)
+        float * dp = ggml_get_data_f32(L.dst);
+        for (int64_t o = 0; o < L.out_dim; ++o) {
+            for (int64_t i = 0; i < L.in_dim; ++i) {
+                dp[i * L.out_dim + o] = L.src[o * L.in_dim + i];
+            }
+        }
     }
     for (const auto & C : view.convs) {
-        ggml_tensor * src = ggml_new_tensor_4d(mctx, GGML_TYPE_F32, C.kw, C.kh, C.in_c, C.out_c);
-        std::memcpy(ggml_get_data_f32(src), C.src,
-                    C.kw * C.kh * C.in_c * C.out_c * sizeof(float));
-        // Permute: (kW, kH, Ci, Co) -> (Co, Ci, kH, kW). The data was in PyTorch
-        // (Co, Ci, kH, kW) order in src's memory, so under the new ne the data
-        // is now contiguous. cont is a no-op but safe.
-        ggml_tensor * t1 = ggml_cont(mctx, ggml_permute(mctx, src, 3, 2, 1, 0));
-        // Permute back: (Co, Ci, kH, kW) -> (kW, kH, Ci, Co). cont reorders bytes.
-        ggml_tensor * t2 = ggml_cont(mctx, ggml_permute(mctx, t1, 3, 2, 1, 0));
-        std::memcpy(ggml_get_data_f32(C.dst), ggml_get_data_f32(t2),
-                    C.kw * C.kh * C.in_c * C.out_c * sizeof(float));
+        // src is (Co, Ci, kH, kW) PyTorch row-major
+        // dst is (kW, kH, Ci, Co) ggml row-major
+        // dst[kw, kh, ci, co] = src[co, ci, kh, kw]
+        float * dp = ggml_get_data_f32(C.dst);
+        for (int64_t co = 0; co < C.out_c; ++co) {
+            for (int64_t ci = 0; ci < C.in_c; ++ci) {
+                for (int64_t kh = 0; kh < C.kh; ++kh) {
+                    for (int64_t kw = 0; kw < C.kw; ++kw) {
+                        int64_t s = ((co * C.in_c + ci) * C.kh + kh) * C.kw + kw;
+                        int64_t d = ((kw * C.kh + kh) * C.in_c + ci) * C.out_c + co;
+                        dp[d] = C.src[s];
+                    }
+                }
+            }
+        }
     }
     for (const auto & V : view.vecs) {
         std::memcpy(ggml_get_data_f32(V.dst), V.src, V.n * sizeof(float));
@@ -338,40 +335,18 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    // --- Scratch context for weight permutation ---
-    // 2 GB scratch — the cont ops after permutes allocate same-size copies.
-    size_t mctx_size = 2ULL * 1024 * 1024 * 1024;
-    void * mctx_buf = mmap(nullptr, mctx_size, PROT_READ | PROT_WRITE,
-                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    if (mctx_buf == MAP_FAILED) {
-        log_err("failed to mmap scratch context");
-        ggml_free(wctx);
-        return 1;
-    }
-    ggml_init_params mparams{ mctx_size, mctx_buf, false };
-    ggml_context * mctx = ggml_init(mparams);
-    if (!mctx) {
-        log_err("failed to allocate scratch context");
-        munmap(mctx_buf, mctx_size);
-        ggml_free(wctx);
-        return 1;
-    }
-
     bonsai::WeightsView view;
     bonsai::VAEWeights W;
     try {
         W = load_vae_weights(wctx, st, view);
     } catch (const std::exception & e) {
         log_err(std::string("loading failed: ") + e.what());
-        ggml_free(mctx);
         ggml_free(wctx);
         return 1;
     }
 
     log_info("materializing weight permutations...");
-    materialize_views(view, mctx);
-    ggml_free(mctx);
-    munmap(mctx_buf, mctx_size);
+    materialize_views(view);
     log_info("all weights loaded into ggml");
 
     // --- Load BN params ---
@@ -505,6 +480,29 @@ int main(int argc, char ** argv) {
     double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     log_info("done in " + std::to_string((int) ms) + " ms");
 
+    // Print stats for each intermediate that was set as output
+    fprintf(stderr, "\n=== Intermediate stats (post-compute) ===\n");
+    for (ggml_tensor * t = ggml_get_first_tensor(actx); t; t = ggml_get_next_tensor(actx, t)) {
+        if (!t->data) continue;
+        const char * name = ggml_get_name(t);
+        if (!name || name[0] == '\0') continue;
+        int64_t n = ggml_nelements(t);
+        if (n == 0) continue;
+        const float * p = (const float *) t->data;
+        double sum = 0, sum2 = 0;
+        float mn = 1e30f, mx = -1e30f;
+        for (int64_t i = 0; i < n; ++i) {
+            sum += p[i];
+            sum2 += (double)p[i] * p[i];
+            if (p[i] < mn) mn = p[i];
+            if (p[i] > mx) mx = p[i];
+        }
+        double mean = sum / n, var = sum2 / n - mean * mean;
+        fprintf(stderr, "  %-22s shape=[%ld,%ld,%ld,%ld] mean=%.4f stddev=%.4f min=%.4f max=%.4f\n",
+                name, t->ne[0], t->ne[1], t->ne[2], t->ne[3],
+                mean, std::sqrt(std::max(0.0, var)), mn, mx);
+    }
+
     int out_h = (int) out->ne[1];
     int out_w = (int) out->ne[0];
     int out_c = (int) out->ne[2];
@@ -521,6 +519,21 @@ int main(int argc, char ** argv) {
 
     std::vector<float> out_data((size_t)(out_h * out_w * out_c));
     std::memcpy(out_data.data(), ggml_get_data_f32(out), out_data.size() * sizeof(float));
+
+    // Per-channel stats (raw, before clamp)
+    int sp = out_h * out_w;
+    for (int c = 0; c < out_c; ++c) {
+        float sum = 0, mn = 1e30f, mx = -1e30f;
+        for (int i = 0; i < sp; ++i) {
+            float v = out_data[c * sp + i];
+            sum += v;
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
+        }
+        sum /= sp;
+        log_info("ch " + std::to_string(c) + ": mean=" + std::to_string(sum) +
+                 " min=" + std::to_string(mn) + " max=" + std::to_string(mx));
+    }
 
     std::vector<uint8_t> rgb((size_t)(out_h * out_w * 3));
     chw_f32_to_hwc_u8(out_data.data(), rgb.data(), out_w, out_h);
