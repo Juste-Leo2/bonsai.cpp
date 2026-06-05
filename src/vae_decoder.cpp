@@ -88,54 +88,32 @@ static ggml_tensor * load_vec(ggml_context * wctx,
     return dst;
 }
 
-// Materialize all the queued weight permutations with manual byte copies.
+// Materialize all the queued weight tensors with simple memcpy.
 //
-// CRITICAL: ggml_conv_2d_direct has a non-obvious behavior. It reshapes the
-// kernel (KW, KH, IC, OC) to 2D (KW*KH*IC, OC) and then does a mul_mat where
-// the (KW*KH*IC) axis is the inner dim of the dot product. The mul_mat
-// implementation accesses this 2D matrix in COLUMN-MAJOR (i.e. as if the
-// outer axis were rows and the inner axis were columns, transposed from
-// the natural row-major storage). So the EFFECTIVE layout that the conv
-// reads is (OC, KW*KH*IC) row-major — NOT (KW*KH*IC, OC) as the
-// reshape suggests. We must permute the PyTorch weight data accordingly.
+// For both linear and conv weights, the byte offset in the ggml allocation
+// matches the byte offset in PyTorch's row-major storage, so no permutation
+// is required.
 //
-// The mapping: dst byte offset (oc*knl_n + (kw*KH+kh)*IC + ic)*4 holds
-// the PyTorch value [oc, ic, kh, kw].
+// Linear: ggml ne=(in_dim, out_dim), PyTorch (out_dim, in_dim).
+//   ggml element (i, o) offset = i + o*in_dim
+//   PyTorch element (o, i) offset = o*in_dim + i            -- identical
+//
+// Conv: ggml ne=(KW, KH, IC, OC), PyTorch (OC, IC, KH, KW).
+//   ggml_conv_2d reshapes the kernel to 2D (KW*KH*IC, OC) -- see
+//   llama.cpp/ggml/src/ggml.c:4595-4600. The flatten order over the inner
+//   three dims is the natural row-major order (KW fastest, then KH, then IC).
+//   ggml element (kw, kh, ic, oc) offset = kw + kh*KW + ic*KW*KH + oc*KW*KH*IC
+//   PyTorch element (oc, ic, kh, kw) offset = oc*IC*KH*KW + ic*KH*KW + kh*KW + kw
+//   Since KW*KH = KH*KW and KW*KH*IC = IC*KH*KW (commutativity), the offsets
+//   are bit-identical. Hence memcpy.
 static void materialize_views(const bonsai::WeightsView & view) {
     for (const auto & L : view.linears) {
-        // For linear weights: the ggml tensor is allocated as ne0=in_dim,
-        // ne1=out_dim (so a (in_dim, out_dim) row-major storage with offset
-        // i + o*in_dim for element (i, o)). PyTorch stores the same matrix
-        // as (out_dim, in_dim) row-major with the same offset o*in_dim + i
-        // for element (o, i). Since the offsets are identical, this is just
-        // a memcpy -- no transposition needed.
         float * dp = ggml_get_data_f32(L.dst);
         std::memcpy(dp, L.src, L.in_dim * L.out_dim * sizeof(float));
     }
     for (const auto & C : view.convs) {
-        // dst has ne=(KW, KH, IC, OC). The conv2d_direct reads it as a 2D
-        // matrix with the inner dim being the FLATTENED (KW, KH, IC) axis
-        // and the outer dim being OC, but accessed in COLUMN-MAJOR order.
-        //
-        // dst byte offset for the element logically at (kw, kh, ic, oc):
-        //   (oc * (KW*KH*IC) + (kw*KH + kh)*IC + ic) * 4
-        // = (oc * knl_n + (kw*KH+kh)*IC + ic) * 4
-        //
-        // PyTorch source offset for [oc, ic, kh, kw]:
-        //   (oc * Ci*kH*kW + ic * kH*kW + kh * kW + kw) * 4
         float * dp = ggml_get_data_f32(C.dst);
-        int64_t knl_n = C.kw * C.kh * C.in_c;
-        for (int64_t oc = 0; oc < C.out_c; ++oc) {
-            for (int64_t ic = 0; ic < C.in_c; ++ic) {
-                for (int64_t kh = 0; kh < C.kh; ++kh) {
-                    for (int64_t kw = 0; kw < C.kw; ++kw) {
-                        int64_t s = ((oc * C.in_c + ic) * C.kh + kh) * C.kw + kw;
-                        int64_t d = oc * knl_n + (kw * C.kh + kh) * C.in_c + ic;
-                        dp[d] = C.src[s];
-                    }
-                }
-            }
-        }
+        std::memcpy(dp, C.src, C.in_c * C.out_c * C.kh * C.kw * sizeof(float));
     }
     for (const auto & V : view.vecs) {
         std::memcpy(ggml_get_data_f32(V.dst), V.src, V.n * sizeof(float));
