@@ -117,20 +117,28 @@ static ggml_tensor * build_attention(ggml_context * ctx, ggml_tensor * x, const 
     ggml_tensor * k = ggml_add(ctx, ggml_mul_mat(ctx, p, a.to_k_w), column_1d(ctx, a.to_k_b));
     ggml_tensor * v = ggml_add(ctx, ggml_mul_mat(ctx, p, a.to_v_w), column_1d(ctx, a.to_v_b));
 
-    // Q @ K^T: stored result is (ne0=seq, ne1=seq)
-    ggml_tensor * scores = ggml_mul_mat(ctx, q, k);
+    // Q @ K^T (math): ggml_mul_mat(A, B) = A^T @ B, and Q,K are stored as
+    // (ne0=seq, ne1=C). To get Q @ K^T we need to transpose both so that
+    // mul_mat(qT, kT) = (qT)^T @ kT = Q @ K^T, producing ne=(seq, seq).
+    ggml_tensor * qT = ggml_cont(ctx, ggml_transpose(ctx, q));
+    ggml_tensor * kT = ggml_cont(ctx, ggml_transpose(ctx, k));
+    ggml_tensor * scores = ggml_mul_mat(ctx, qT, kT);
     // Python's AttnBlock is single-head with q shape (B, 1, seq, C), so SDPA
     // uses scale = 1/sqrt(C) where C is the embed_dim (= channel count here).
     float scale = 1.0f / std::sqrt(static_cast<float>(C));
     scores = ggml_scale(ctx, scores, scale);
     scores = ggml_soft_max_ext(ctx, scores, nullptr, 1.0f, 0.0f);
 
-    // scores @ V: result stored as (ne0=C, ne1=seq)
-    ggml_tensor * vT = ggml_cont(ctx, ggml_transpose(ctx, v));
-    ggml_tensor * ctx_attn = ggml_mul_mat(ctx, scores, vT);
+    // softmax(QK^T) @ V (math): mul_mat(A, B) = A^T @ B, so we transpose
+    // scores (and keep v as is) so that mul_mat(scoresT, v) = scores @ V,
+    // producing ne=(seq, C).
+    ggml_tensor * scoresT = ggml_cont(ctx, ggml_transpose(ctx, scores));
+    ggml_tensor * ctx_attn = ggml_mul_mat(ctx, scoresT, v);
 
-    // output projection: result is (ne0=C, ne1=seq)
-    ggml_tensor * out = ggml_add(ctx, ggml_mul_mat(ctx, ctx_attn, a.to_out_w), column_1d(ctx, a.to_out_b));
+    // output projection: transpose ctx_attn so that
+    // mul_mat(ctxT, to_out_w) = ctx_attn @ to_out_w, producing ne=(seq, C).
+    ggml_tensor * ctxT = ggml_cont(ctx, ggml_transpose(ctx, ctx_attn));
+    ggml_tensor * out = ggml_add(ctx, ggml_mul_mat(ctx, ctxT, a.to_out_w), column_1d(ctx, a.to_out_b));
 
     // transpose to (ne0=seq, ne1=C) then reshape to (W, H, N, C)
     out = ggml_cont(ctx, ggml_transpose(ctx, out));
