@@ -119,7 +119,9 @@ static ggml_tensor * build_attention(ggml_context * ctx, ggml_tensor * x, const 
 
     // Q @ K^T: stored result is (ne0=seq, ne1=seq)
     ggml_tensor * scores = ggml_mul_mat(ctx, q, k);
-    float scale = 1.0f / std::sqrt(static_cast<float>(a.head_dim));
+    // Python's AttnBlock is single-head with q shape (B, 1, seq, C), so SDPA
+    // uses scale = 1/sqrt(C) where C is the embed_dim (= channel count here).
+    float scale = 1.0f / std::sqrt(static_cast<float>(C));
     scores = ggml_scale(ctx, scores, scale);
     scores = ggml_soft_max_ext(ctx, scores, nullptr, 1.0f, 0.0f);
 
@@ -142,7 +144,9 @@ static ggml_tensor * build_attention(ggml_context * ctx, ggml_tensor * x, const 
 
     // Build the full decoder graph.
 // x: input latent in NCHW (ggml: [W, H, 32, 1])
-// returns: output RGB image in NCHW (ggml: [W, H, 3, 1]) with values in [0, 1]
+// returns: output RGB image in NCHW (ggml: [W, H, 3, 1]) with raw decoder values
+//          (matches Python's flux2_vae.Decoder.forward, which does no post-processing;
+//          sigmoid+clip is the visualization script's responsibility, not the decoder's)
 ggml_tensor * build_decoder_graph(ggml_context * ctx, const VAEWeights & w, ggml_tensor * x) {
     // post_quant_conv: 1x1, 32 -> 32
     ggml_tensor * h = ggml_conv_2d_direct(ctx, w.post_quant_conv.w, x, 1, 1, 0, 0, 1, 1);
@@ -152,11 +156,12 @@ ggml_tensor * build_decoder_graph(ggml_context * ctx, const VAEWeights & w, ggml
     h = ggml_conv_2d_direct(ctx, w.conv_in.w, h, 1, 1, 1, 1, 1, 1);
     h = ggml_add(ctx, h, channel_1d(ctx, w.conv_in.b));
 
-    // mid_block
-    for (const ResNet & r : w.mid_block.resnets) {
-        h = build_resnet(ctx, h, r);
-    }
+    // mid_block: matches Python Decoder.forward which is
+    //   h = self.mid.block_1(h); h = self.mid.attn_1(h); h = self.mid.block_2(h)
+    // i.e. attention is INTERLEAVED between the two resnets, not after them.
+    h = build_resnet(ctx, h, w.mid_block.resnets[0]);
     h = build_attention(ctx, h, w.mid_block.attn);
+    h = build_resnet(ctx, h, w.mid_block.resnets[1]);
 
     // up_blocks
     for (const UpBlock & ub : w.up_blocks) {
@@ -179,9 +184,6 @@ ggml_tensor * build_decoder_graph(ggml_context * ctx, const VAEWeights & w, ggml
     // conv_out: 3x3, 128 -> 3
     h = ggml_conv_2d_direct(ctx, w.conv_out.w, h, 1, 1, 1, 1, 1, 1);
     h = ggml_add(ctx, h, channel_1d(ctx, w.conv_out.b));
-
-    // clamp to [0, 1]
-    h = ggml_clamp(ctx, h, 0.0f, 1.0f);
 
     return h;
 }

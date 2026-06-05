@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -277,12 +278,18 @@ void write_png(const std::string & path, int w, int h, const uint8_t * rgb) {
 }
 
 void chw_f32_to_hwc_u8(const float * src, uint8_t * dst, int W, int H) {
+    // Matches run_vae.py post-processing: sigmoid then *255 clip.
+    // The decoder itself returns raw values (like Python's flux2_vae.Decoder.forward);
+    // the sigmoid is the visualization's responsibility.
     for (int y = 0; y < H; ++y) {
         for (int x = 0; x < W; ++x) {
             int spatial = y * W + x;
             float r = src[0 * W * H + spatial];
             float g = src[1 * W * H + spatial];
             float b = src[2 * W * H + spatial];
+            r = 1.0f / (1.0f + std::exp(-r));
+            g = 1.0f / (1.0f + std::exp(-g));
+            b = 1.0f / (1.0f + std::exp(-b));
             int idx = (y * W + x) * 3;
             dst[idx + 0] = (uint8_t) std::min(255, std::max(0, (int) (r * 255.0f)));
             dst[idx + 1] = (uint8_t) std::min(255, std::max(0, (int) (g * 255.0f)));
