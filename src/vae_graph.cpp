@@ -73,22 +73,23 @@ static ggml_tensor * build_resnet(ggml_context * ctx, ggml_tensor * x, const Res
     return ggml_add(ctx, c2, h);
 }
 
-// Self-attention block (naive, no multi-head split, single batch assumed):
-//   h = x  (shape: [W, H, C, N] - ggml NCHW)
+// Self-attention block (single-head, single-batch, ggml NCHW input):
+//   h = x                                       (W, H, C, N)
 //   x = group_norm(x) * gn_w + gn_b
-//   x = permute(0,1,3,2) -> [W, H, N, C]   (contiguous)
-//   x = reshape_2d to [C, seq]  where seq = W*H*N
-//   q = mul_mat(x, W_q) + b_q -> (ne0=C, ne1=seq)
-//   k = mul_mat(x, W_k) + b_k
-//   v = mul_mat(x, W_v) + b_v
-//   scores = mul_mat(q, k) -> (ne0=seq, ne1=seq)  -- this is Q @ K^T
-//   scores = scores * (1/sqrt(head_dim))
-//   scores = softmax(scores) over ne[0]
-//   ctx_attn = mul_mat(scores, transpose(v)) -> (ne0=C, ne1=seq)  -- scores @ V
-//   out = mul_mat(ctx_attn, W_out) + b_out
-//   out = transpose(out) -> (ne0=seq, ne1=C)
-//   out = reshape_4d to (W, H, N, C)
-//   out = permute(0,1,3,2) -> (W, H, C, N)   (contiguous)
+//   x = permute(1, 2, 0, 3) + cont              -> (C, W, H, N) contiguous, C is inner dim
+//   x = reshape_2d to (C, seq)                  (matches PyTorch rearrange to (seq, C) with C inner)
+//   q = mul_mat(W_q, x) + b_q                   (ne0=C, ne1=seq)  -- weight as first arg
+//   k = mul_mat(W_k, x) + b_k
+//   v = mul_mat(W_v, x) + b_v
+//   scores = mul_mat(k, q)                      (ne0=seq=keys, ne1=seq=queries) -- k first so ne0=keys
+//   scores = scores * (1/sqrt(C))
+//   scores = softmax(scores) over ne[0]         (normalizes over keys -- correct for SDPA)
+//   vT   = transpose(v)
+//   ctx  = mul_mat(scores, vT)                  (ne0=seq, ne1=C) -- math (C, seq), needs swap
+//   ctxT = transpose(ctx)                       (ne0=C, ne1=seq) -- math (seq, C)
+//   out  = mul_mat(W_out, ctxT) + b_out         (ne0=C, ne1=seq) -- math (seq, C)
+//   out  = reshape_4d to (C, W, H, N)
+//   out  = permute(2, 0, 1, 3) + cont           -> (W, H, C, N) NCHW
 //   return out + h
 static ggml_tensor * build_attention(ggml_context * ctx, ggml_tensor * x, const Attention & a) {
     ggml_tensor * h = x;
@@ -106,46 +107,61 @@ static ggml_tensor * build_attention(ggml_context * ctx, ggml_tensor * x, const 
     ggml_tensor * gb = channel_1d(ctx, a.group_norm_b);
     gn = ggml_add(ctx, gn, gb);
 
-    // permute (W,H,C,N) -> (W,H,N,C), contiguous
-    ggml_tensor * p = ggml_cont(ctx, ggml_permute(ctx, gn, 0, 1, 3, 2));
+    // permute (W,H,C,N) -> (C,W,H,N), contiguous. After this, the memory is
+    // laid out with C as the inner (fastest-varying) dim, matching PyTorch's
+    // rearrange(q, "b c h w -> b 1 (h w) c") which puts c as innermost.
+    // ggml_permute args are the NEW position of each OLD dim: axis0=new_pos_of_ne0,
+    // so to put old ne0 (W) at new position 1, axis0=1; old ne1 (H) at new pos 2,
+    // axis1=2; old ne2 (C) at new pos 0, axis2=0; old ne3 (N) stays, axis3=3.
+    ggml_tensor * p = ggml_cont(ctx, ggml_permute(ctx, gn, 1, 2, 0, 3));
 
     // reshape to (ne0=C, ne1=seq)  -- "x" in our notation
     p = ggml_reshape_2d(ctx, p, C, seq);
 
-    // Q, K, V  (mul_mat output is 2D: ne0=out=C, ne1=seq)
-    ggml_tensor * q = ggml_add(ctx, ggml_mul_mat(ctx, p, a.to_q_w), column_1d(ctx, a.to_q_b));
-    ggml_tensor * k = ggml_add(ctx, ggml_mul_mat(ctx, p, a.to_k_w), column_1d(ctx, a.to_k_b));
-    ggml_tensor * v = ggml_add(ctx, ggml_mul_mat(ctx, p, a.to_v_w), column_1d(ctx, a.to_v_b));
+    // Q, K, V  -- weight as first arg so result has ne0=C (the channel dim).
+    // In ggml, ggml_mul_mat(A, B) gives result.ne[0] = A->ne[1], so with
+    // A=W (ne0=in_dim=C, ne1=out_dim=C) and B=p (ne0=C, ne1=seq), the
+    // result is (ne0=C, ne1=seq). This is the right shape for the per-channel
+    // bias (column_1d reshapes the bias to (C,1,1,1) which broadcasts along
+    // ne[1] from 1 to seq, adding the channel-bias to every position).
+    ggml_tensor * q = ggml_add(ctx, ggml_mul_mat(ctx, a.to_q_w, p), column_1d(ctx, a.to_q_b));
+    ggml_tensor * k = ggml_add(ctx, ggml_mul_mat(ctx, a.to_k_w, p), column_1d(ctx, a.to_k_b));
+    ggml_tensor * v = ggml_add(ctx, ggml_mul_mat(ctx, a.to_v_w, p), column_1d(ctx, a.to_v_b));
 
-    // Q @ K^T (math): ggml_mul_mat(A, B) = A^T @ B, and Q,K are stored as
-    // (ne0=seq, ne1=C). To get Q @ K^T we need to transpose both so that
-    // mul_mat(qT, kT) = (qT)^T @ kT = Q @ K^T, producing ne=(seq, seq).
-    ggml_tensor * qT = ggml_cont(ctx, ggml_transpose(ctx, q));
-    ggml_tensor * kT = ggml_cont(ctx, ggml_transpose(ctx, k));
-    ggml_tensor * scores = ggml_mul_mat(ctx, qT, kT);
+    // Q @ K^T (math): Q,K are stored as (ne0=C, ne1=seq). For mul_mat(A,B) the
+    // contraction is over ne[0] and result.ne[0] = A->ne[1]. To get the math
+    // (seq, seq) scores and have ne[0]=keys (so the default softmax on ne[0]
+    // normalizes over the keys, matching SDPA), we want A.ne[1]=keys, so we
+    // pass k as the first arg: mul_mat(k, q) -> ne0=k.ne[1]=seq=keys, ne1=seq.
+    ggml_tensor * scores = ggml_mul_mat(ctx, k, q);
     // Python's AttnBlock is single-head with q shape (B, 1, seq, C), so SDPA
     // uses scale = 1/sqrt(C) where C is the embed_dim (= channel count here).
     float scale = 1.0f / std::sqrt(static_cast<float>(C));
     scores = ggml_scale(ctx, scores, scale);
+    // ggml_soft_max_ext normalizes over ne[0]; with our setup ne[0]=keys. ✓
     scores = ggml_soft_max_ext(ctx, scores, nullptr, 1.0f, 0.0f);
 
-    // softmax(QK^T) @ V (math): mul_mat(A, B) = A^T @ B, so we transpose
-    // scores (and keep v as is) so that mul_mat(scoresT, v) = scores @ V,
-    // producing ne=(seq, C).
-    ggml_tensor * scoresT = ggml_cont(ctx, ggml_transpose(ctx, scores));
-    ggml_tensor * ctx_attn = ggml_mul_mat(ctx, scoresT, v);
-
-    // output projection: transpose ctx_attn so that
-    // mul_mat(ctxT, to_out_w) = ctx_attn @ to_out_w, producing ne=(seq, C).
+    // softmax(QK^T) @ V (math): scores is (ne0=seq=keys, ne1=seq=queries),
+    // v is (ne0=C, ne1=seq). To compute scores @ V via mul_mat(A, B) we need
+    // A.ne[0] = B.ne[0] for the contraction. We transpose v to get vT with
+    // ne[0]=seq, then mul_mat(scores, vT) contracts on ne[0]=seq. The result
+    // is (ne0=seq, ne1=C) which corresponds to math (C, seq) — transposed
+    // relative to what we want (math (seq, C)), so we transpose once more.
+    ggml_tensor * vT = ggml_cont(ctx, ggml_transpose(ctx, v));
+    ggml_tensor * ctx_attn = ggml_mul_mat(ctx, scores, vT);
     ggml_tensor * ctxT = ggml_cont(ctx, ggml_transpose(ctx, ctx_attn));
-    ggml_tensor * out = ggml_add(ctx, ggml_mul_mat(ctx, ctxT, a.to_out_w), column_1d(ctx, a.to_out_b));
 
-    // transpose to (ne0=seq, ne1=C) then reshape to (W, H, N, C)
-    out = ggml_cont(ctx, ggml_transpose(ctx, out));
-    out = ggml_reshape_4d(ctx, out, W, H, N, C);
+    // output projection: ctxT is (ne0=C, ne1=seq). With W_out also (ne0=C, ne1=C),
+    // mul_mat(W_out, ctxT) gives (ne0=C, ne1=seq) — math (seq, C). ✓
+    ggml_tensor * out = ggml_add(ctx, ggml_mul_mat(ctx, a.to_out_w, ctxT), column_1d(ctx, a.to_out_b));
 
-    // permute (W, H, N, C) -> (W, H, C, N) back to NCHW
-    out = ggml_cont(ctx, ggml_permute(ctx, out, 0, 1, 3, 2));
+    // out is (ne0=C, ne1=seq). Reshape to (C, W, H, N) preserving the
+    // (C, W, H, N) row-major memory order, then permute to NCHW.
+    // ggml_permute args = new position of each old dim: old C (ne0) at new
+    // pos 2 -> axis0=2; old W (ne1) at new pos 0 -> axis1=0; old H (ne2) at
+    // new pos 1 -> axis2=1; old N (ne3) stays -> axis3=3.
+    out = ggml_reshape_4d(ctx, out, C, W, H, N);
+    out = ggml_cont(ctx, ggml_permute(ctx, out, 2, 0, 1, 3));
 
     return ggml_add(ctx, out, h);
 }

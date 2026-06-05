@@ -29,7 +29,9 @@ void log_info(const std::string & msg) { std::cout << "[INFO] " << msg << std::e
 void log_err (const std::string & msg) { std::cerr << "[ERROR] " << msg << std::endl; }
 
 // Load a linear weight from PyTorch layout (out, in) into a ggml tensor
-// in PyTorch layout (in, out) [renamed to ggml shape (ne0=in, ne1=out)].
+// with shape (ne0=in, ne1=out). The data is left in PyTorch's row-major
+// (out, in) layout; because the byte offset for element (i, o) is the
+// same in both layouts (i + o*in_dim), materialize_views can just memcpy.
 static ggml_tensor * load_linear_w(ggml_context * wctx,
                                    bonsai::WeightsView & view,
                                    const bonsai::SafeTensor & t) {
@@ -101,16 +103,14 @@ static ggml_tensor * load_vec(ggml_context * wctx,
 // the PyTorch value [oc, ic, kh, kw].
 static void materialize_views(const bonsai::WeightsView & view) {
     for (const auto & L : view.linears) {
-        // For linear weights: ggml_mul_mat (in attention block) is row-major
-        // with the inner dim being ne0. The weight is stored with ne=(in, out),
-        // and the matmul does (in, seq) @ (in, out)^T = (out, seq). So
-        // PyTorch (out, in) row-major must become ggml (in, out) row-major.
+        // For linear weights: the ggml tensor is allocated as ne0=in_dim,
+        // ne1=out_dim (so a (in_dim, out_dim) row-major storage with offset
+        // i + o*in_dim for element (i, o)). PyTorch stores the same matrix
+        // as (out_dim, in_dim) row-major with the same offset o*in_dim + i
+        // for element (o, i). Since the offsets are identical, this is just
+        // a memcpy -- no transposition needed.
         float * dp = ggml_get_data_f32(L.dst);
-        for (int64_t o = 0; o < L.out_dim; ++o) {
-            for (int64_t i = 0; i < L.in_dim; ++i) {
-                dp[i * L.out_dim + o] = L.src[o * L.in_dim + i];
-            }
-        }
+        std::memcpy(dp, L.src, L.in_dim * L.out_dim * sizeof(float));
     }
     for (const auto & C : view.convs) {
         // dst has ne=(KW, KH, IC, OC). The conv2d_direct reads it as a 2D
