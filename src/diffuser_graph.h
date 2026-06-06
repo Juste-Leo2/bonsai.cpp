@@ -13,6 +13,8 @@ struct DiffuserGraph {
     ggml_tensor * img_in;
     ggml_tensor * txt_in;
     ggml_tensor * timestep;
+    ggml_tensor * img_ids;
+    ggml_tensor * txt_ids;
     ggml_tensor * out;
     ggml_cgraph * graph;
     std::vector<B1LinearUserData> b1_ud;
