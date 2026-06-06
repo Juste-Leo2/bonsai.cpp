@@ -256,15 +256,15 @@ static void load_diffuser_weights(
         find_b1_weights(f, data_offset, infos, ctx, prefix + ".attn.to_k.weight", db.attn_to_k, H, H);
         find_b1_weights(f, data_offset, infos, ctx, prefix + ".attn.to_v.weight", db.attn_to_v, H, H);
         find_b1_weights(f, data_offset, infos, ctx, prefix + ".attn.to_out.0.weight", db.attn_to_out, H, H);
-        find_f32_weight(f, data_offset, infos, ctx, prefix + ".attn.norm_q.weight", db.attn_norm_q, H);
-        find_f32_weight(f, data_offset, infos, ctx, prefix + ".attn.norm_k.weight", db.attn_norm_k, H);
+        find_f32_weight(f, data_offset, infos, ctx, prefix + ".attn.norm_q.weight", db.attn_norm_q, params.head_dim);
+        find_f32_weight(f, data_offset, infos, ctx, prefix + ".attn.norm_k.weight", db.attn_norm_k, params.head_dim);
 
         find_b1_weights(f, data_offset, infos, ctx, prefix + ".attn.add_q_proj.weight", db.attn_add_q, H, H);
         find_b1_weights(f, data_offset, infos, ctx, prefix + ".attn.add_k_proj.weight", db.attn_add_k, H, H);
         find_b1_weights(f, data_offset, infos, ctx, prefix + ".attn.add_v_proj.weight", db.attn_add_v, H, H);
         find_b1_weights(f, data_offset, infos, ctx, prefix + ".attn.to_add_out.weight", db.attn_add_out, H, H);
-        find_f32_weight(f, data_offset, infos, ctx, prefix + ".attn.norm_added_q.weight", db.attn_norm_added_q, H);
-        find_f32_weight(f, data_offset, infos, ctx, prefix + ".attn.norm_added_k.weight", db.attn_norm_added_k, H);
+        find_f32_weight(f, data_offset, infos, ctx, prefix + ".attn.norm_added_q.weight", db.attn_norm_added_q, params.head_dim);
+        find_f32_weight(f, data_offset, infos, ctx, prefix + ".attn.norm_added_k.weight", db.attn_norm_added_k, params.head_dim);
 
         find_b1_weights(f, data_offset, infos, ctx, prefix + ".ff.linear_in.weight", db.ff_linear_in, H, mlp_hd * 2);
         find_b1_weights(f, data_offset, infos, ctx, prefix + ".ff.linear_out.weight", db.ff_linear_out, mlp_hd, H);
@@ -280,8 +280,8 @@ static void load_diffuser_weights(
 
         find_b1_weights(f, data_offset, infos, ctx, prefix + ".attn.to_qkv_mlp_proj.weight", sb.to_qkv_mlp_proj, H, qkv_mlp_dim);
         find_b1_weights(f, data_offset, infos, ctx, prefix + ".attn.to_out.weight", sb.to_out, H + mlp_hd, H);
-        find_f32_weight(f, data_offset, infos, ctx, prefix + ".attn.norm_q.weight", sb.norm_q, H);
-        find_f32_weight(f, data_offset, infos, ctx, prefix + ".attn.norm_k.weight", sb.norm_k, H);
+        find_f32_weight(f, data_offset, infos, ctx, prefix + ".attn.norm_q.weight", sb.norm_q, params.head_dim);
+        find_f32_weight(f, data_offset, infos, ctx, prefix + ".attn.norm_k.weight", sb.norm_k, params.head_dim);
     }
 
     find_b1_weights(f, data_offset, infos, ctx, "norm_out.linear.weight", w.norm_out_linear, H, 2 * H);
@@ -326,7 +326,7 @@ int main(int argc, char ** argv) {
     int img_tokens = H * W;
     int txt_tokens = 512;
 
-    size_t ctx_size = 1024 * 1024 * 1024;
+    size_t ctx_size = 12ULL * 1024 * 1024 * 1024;
     std::vector<uint8_t> buf(ctx_size);
     struct ggml_init_params gparams = {
         /*.mem_size   =*/ ctx_size,
@@ -358,6 +358,17 @@ int main(int argc, char ** argv) {
         latents[i] = ((float)rand() / RAND_MAX) * 2.0f - 1.0f;
     }
 
+    std::vector<float> img_ids(4 * img_tokens, 0.0f);
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            int idx = y * W + x;
+            img_ids[0 * img_tokens + idx] = (float)y;
+            img_ids[1 * img_tokens + idx] = (float)x;
+        }
+    }
+
+    std::vector<float> txt_ids(4 * txt_tokens, 0.0f);
+
     std::vector<float> timesteps(steps);
     for (int i = 0; i < steps; i++) {
         timesteps[i] = 1.0f - (float)i / steps;
@@ -372,6 +383,8 @@ int main(int argc, char ** argv) {
         memcpy(dg.img_in->data, latents.data(), latents.size() * sizeof(float));
         memcpy(dg.txt_in->data, txt_emb.data(), txt_emb.size() * sizeof(float));
         memcpy(dg.timestep->data, &t, sizeof(float));
+        memcpy(dg.img_ids->data, img_ids.data(), img_ids.size() * sizeof(float));
+        memcpy(dg.txt_ids->data, txt_ids.data(), txt_ids.size() * sizeof(float));
 
         ggml_graph_compute_with_ctx(ctx, dg.graph, n_threads);
 

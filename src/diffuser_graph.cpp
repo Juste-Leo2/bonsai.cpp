@@ -69,12 +69,13 @@ static QKVProj single_qkv(ggml_context * ctx, ggml_tensor * x, int hidden_size, 
 }
 
 static ggml_tensor * rms_norm_qk(ggml_context * ctx, ggml_tensor * x, ggml_tensor * w, int head_dim) {
-    int seq = x->ne[1];
-    int n_heads = x->ne[0] / head_dim;
-    x = ggml_cont(ctx, ggml_reshape_3d(ctx, x, head_dim, seq, n_heads));
-    x = ggml_norm(ctx, x, 1e-6f);
-    x = ggml_mul(ctx, x, ggml_repeat(ctx, column_1d(ctx, w), x));
-    return ggml_cont(ctx, ggml_reshape_2d(ctx, x, x->ne[0] * x->ne[1], x->ne[2]));
+    int n_heads = x->ne[1];
+    int seq     = x->ne[2];
+    x = ggml_cont(ctx, ggml_reshape_3d(ctx, x, head_dim, n_heads, seq));
+    x = ggml_rms_norm(ctx, x, 1e-6f);
+    ggml_tensor * w_view = ggml_reshape_3d(ctx, w, head_dim, 1, 1);
+    x = ggml_mul(ctx, x, ggml_repeat(ctx, w_view, x));
+    return ggml_cont(ctx, x);
 }
 
 static QKV split_qkv(ggml_context * ctx, ggml_tensor * qkv, int hidden_size, int num_heads, int seq) {
@@ -90,7 +91,7 @@ static QKV split_qkv(ggml_context * ctx, ggml_tensor * qkv, int hidden_size, int
     ggml_tensor * v_t = view_h(qkv, 2);
 
     auto reshape_heads = [&](ggml_tensor * t) {
-        return ggml_cont(ctx, ggml_reshape_3d(ctx, t, head_dim, num_heads, seq));
+        return ggml_cont(ctx, ggml_reshape_3d(ctx, ggml_cont(ctx, t), head_dim, num_heads, seq));
     };
 
     r.q = reshape_heads(q_t);
@@ -110,38 +111,91 @@ static QKV split_qkv_cat(ggml_context * ctx, ggml_tensor * q_t, ggml_tensor * k_
     return r;
 }
 
-static ggml_tensor * apply_rope_2d(ggml_context * ctx, ggml_tensor * q, ggml_tensor * k, ggml_tensor * pe, int head_dim, int theta) {
-    int n_dims = head_dim;
-    int mode = GGML_ROPE_TYPE_NEOX;
-    int sections[4] = {0};
+// Flux 2D RoPE implementation
+// Reference (Python): rope(pos, dim, theta) returns [..., dim/2, 2, 2]
+//   out = stack([cos, -sin, sin, cos], dim=-1)
+//   out = rearrange(out, "b n d (i j) -> b n d i j", i=2, j=2)
+// apply_rope(xq, xk, freqs_cis):
+//   xq_ = xq.reshape(*xq.shape[:-1], -1, 1, 2)
+//   xq_out = freqs_cis[..., 0] * xq_[..., 0] + freqs_cis[..., 1] * xq_[..., 1]
+//   result: [a*cos - b*sin, a*sin + b*cos] for (a, b) = (q_even, q_odd)
+//
+// C++ implementation: precompute cos[d, s] and sin[d, s] (d in [0, head_dim/2)).
+// Use a custom op to apply the 2D rotation in-place per (d, h, s) pair.
 
-    q = ggml_rope_ext(ctx, q, pe, nullptr, n_dims, mode, 0, theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
-    k = ggml_rope_ext(ctx, k, pe, nullptr, n_dims, mode, 0, theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
-
-    return q;
+static ggml_tensor * build_rope_freqs_table(ggml_context * ctx, const int * axes_dim, int n_axes, float theta) {
+    int max_half = 0;
+    for (int i = 0; i < n_axes; i++) {
+        max_half = std::max(max_half, axes_dim[i] / 2);
+    }
+    ggml_tensor * freqs = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, max_half, n_axes);
+    freqs->data = malloc(max_half * n_axes * sizeof(float));
+    float * data = (float *)freqs->data;
+    for (int a = 0; a < n_axes; a++) {
+        int ax_half = axes_dim[a] / 2;
+        for (int j = 0; j < ax_half; j++) {
+            float scale = (float)(j * 2) / (float)axes_dim[a];
+            data[a * max_half + j] = 1.0f / powf(theta, scale);
+        }
+    }
+    return freqs;
 }
 
-static ggml_tensor * build_rope_pe(ggml_context * ctx, ggml_tensor * ids, int head_dim, int theta, int n_axes, int axes_dim) {
-    int n_freqs = head_dim / 2;
+static void build_rope_cos_sin(
+    ggml_context * ctx,
+    ggml_tensor * ids,
+    ggml_tensor * freqs_table,
+    const int * axes_dim,
+    int n_axes,
+    ggml_tensor ** cos_out,
+    ggml_tensor ** sin_out)
+{
+    // ids: [n_axes, seq]
+    // freqs_table: [max_half, n_axes]
+    // For each axis a:
+    //   axis_ids:  [seq] (view)
+    //   axis_freqs: [ax_half, 1] (view)
+    //   angles_a:  [ax_half, seq] = mul(axis_freqs, axis_ids)
+    // Concat axes -> [head_dim/2, seq]
     int seq = ids->ne[1];
-    
-    ggml_tensor * freqs = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_freqs);
-    
-    ggml_backend_t cpu_backend = ggml_backend_cpu_init();
-    if (cpu_backend) {
-        float * freq_data = new float[n_freqs];
-        for (int i = 0; i < n_freqs; i++) {
-            float scale = (float)i / n_freqs;
-            freq_data[i] = 1.0f / powf(theta, scale);
-        }
-        ggml_backend_tensor_set(freqs, freq_data, 0, n_freqs * sizeof(float));
-        delete[] freq_data;
-        ggml_backend_free(cpu_backend);
-    }
 
-    ggml_tensor * pe = ggml_mul_mat(ctx, freqs, ids);
-    pe = ggml_cont(ctx, ggml_reshape_3d(ctx, pe, n_freqs, n_axes, seq));
-    return pe;
+    ggml_tensor * all_angles = nullptr;
+    for (int a = 0; a < n_axes; a++) {
+        int ax_half = axes_dim[a] / 2;
+        ggml_tensor * axis_ids = ggml_view_1d(ctx, ids, seq, (size_t)a * seq * sizeof(float));
+        ggml_tensor * axis_freqs = ggml_view_1d(ctx, freqs_table, ax_half,
+            (size_t)a * freqs_table->ne[0] * sizeof(float));
+        ggml_tensor * axis_ids_2d  = ggml_reshape_2d(ctx, axis_ids,  1,     seq);
+        ggml_tensor * axis_freqs_2d = ggml_reshape_2d(ctx, axis_freqs, 1,     ax_half);
+        ggml_tensor * angles = ggml_mul_mat(ctx, axis_freqs_2d, axis_ids_2d);
+        if (all_angles == nullptr) {
+            all_angles = angles;
+        } else {
+            all_angles = ggml_concat(ctx, all_angles, angles, 0);
+        }
+    }
+    *cos_out = ggml_cont(ctx, ggml_cos(ctx, all_angles));
+    *sin_out = ggml_cont(ctx, ggml_sin(ctx, all_angles));
+}
+
+static void apply_rope_2d(
+    ggml_context * ctx,
+    ggml_tensor * q,
+    ggml_tensor * k,
+    ggml_tensor * cos_t,
+    ggml_tensor * sin_t,
+    int head_dim,
+    int n_threads,
+    std::vector<Rope2DUserData> & rope_ud,
+    ggml_tensor ** q_out,
+    ggml_tensor ** k_out)
+{
+    int n_heads = q->ne[1];
+    int seq     = q->ne[2];
+    rope_ud.push_back({head_dim, n_heads, seq});
+    *q_out = rope_2d_fwd(ctx, q, cos_t, sin_t, rope_ud.back());
+    rope_ud.push_back({head_dim, n_heads, seq});
+    *k_out = rope_2d_fwd(ctx, k, cos_t, sin_t, rope_ud.back());
 }
 
 static ggml_tensor * attention(ggml_context * ctx, ggml_tensor * q, ggml_tensor * k, ggml_tensor * v, int seq_q, int seq_k, int head_dim) {
@@ -194,8 +248,8 @@ DiffuserGraph build_diffuser_graph(
     result.img_in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, params.in_channels, img_tokens * batch);
     result.txt_in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, params.context_in_dim, txt_tokens * batch);
     result.timestep = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
-    result.img_ids = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 3, img_tokens * batch);
-    result.txt_ids = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 3, txt_tokens * batch);
+    result.img_ids = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, img_tokens * batch);
+    result.txt_ids = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, txt_tokens * batch);
 
     ggml_set_input(result.img_in);
     ggml_set_input(result.txt_in);
@@ -235,18 +289,25 @@ DiffuserGraph build_diffuser_graph(
     ModSplit txt_mod1, txt_mod2;
     split_mod(ctx, mod_txt_raw, H, 1, txt_mod1, txt_mod2);
 
-    int axes_dim = 32;
     int n_axes = 4;
-    int pe_head_dim = head_dim / 2;
+    int axes_dim[4] = {32, 32, 32, 32};
 
-    ggml_tensor * pe_img = build_rope_pe(ctx, result.img_ids, head_dim, params.theta, n_axes, axes_dim);
-    ggml_tensor * pe_txt = build_rope_pe(ctx, result.txt_ids, head_dim, params.theta, n_axes, axes_dim);
+    ggml_tensor * freqs_table = build_rope_freqs_table(ctx, axes_dim, n_axes, (float)params.theta);
+
+    ggml_tensor * cos_img = nullptr;
+    ggml_tensor * sin_img = nullptr;
+    ggml_tensor * cos_txt = nullptr;
+    ggml_tensor * sin_txt = nullptr;
+    build_rope_cos_sin(ctx, result.img_ids, freqs_table, axes_dim, n_axes, &cos_img, &sin_img);
+    build_rope_cos_sin(ctx, result.txt_ids, freqs_table, axes_dim, n_axes, &cos_txt, &sin_txt);
+
+    ggml_tensor * cos_combined = ggml_concat(ctx, cos_txt, cos_img, 1);
+    ggml_tensor * sin_combined = ggml_concat(ctx, sin_txt, sin_img, 1);
 
     ggml_tensor * one_tensor = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
     ggml_tensor * ones = ggml_fill(ctx, one_tensor, 1.0f);
 
-    std::vector<ggml_tensor *> pe_cache;
-    (void)pe_cache;
+    (void)ones;
 
     for (int d = 0; d < params.depth; d++) {
         const auto & db = weights.double_blocks[d];
@@ -266,50 +327,48 @@ DiffuserGraph build_diffuser_graph(
         ggml_tensor * txt_k = b1(txt_n, db.attn_add_k);
         ggml_tensor * txt_v = b1(txt_n, db.attn_add_v);
 
-        img_q = ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_3d(ctx, img_q, head_dim, n_heads, img_tokens), 0, 2, 1, 3));
-        img_k = ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_3d(ctx, img_k, head_dim, n_heads, img_tokens), 0, 2, 1, 3));
-        img_v = ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_3d(ctx, img_v, head_dim, n_heads, img_tokens), 0, 2, 1, 3));
+        img_q = ggml_cont(ctx, ggml_reshape_3d(ctx, img_q, head_dim, n_heads, img_tokens));
+        img_k = ggml_cont(ctx, ggml_reshape_3d(ctx, img_k, head_dim, n_heads, img_tokens));
+        img_v = ggml_cont(ctx, ggml_reshape_3d(ctx, img_v, head_dim, n_heads, img_tokens));
 
-        txt_q = ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_3d(ctx, txt_q, head_dim, n_heads, txt_tokens), 0, 2, 1, 3));
-        txt_k = ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_3d(ctx, txt_k, head_dim, n_heads, txt_tokens), 0, 2, 1, 3));
-        txt_v = ggml_cont(ctx, ggml_permute(ctx, ggml_reshape_3d(ctx, txt_v, head_dim, n_heads, txt_tokens), 0, 2, 1, 3));
+        txt_q = ggml_cont(ctx, ggml_reshape_3d(ctx, txt_q, head_dim, n_heads, txt_tokens));
+        txt_k = ggml_cont(ctx, ggml_reshape_3d(ctx, txt_k, head_dim, n_heads, txt_tokens));
+        txt_v = ggml_cont(ctx, ggml_reshape_3d(ctx, txt_v, head_dim, n_heads, txt_tokens));
 
         img_q = rms_norm_qk(ctx, img_q, db.attn_norm_q.data, head_dim);
         img_k = rms_norm_qk(ctx, img_k, db.attn_norm_k.data, head_dim);
         txt_q = rms_norm_qk(ctx, txt_q, db.attn_norm_added_q.data, head_dim);
         txt_k = rms_norm_qk(ctx, txt_k, db.attn_norm_added_k.data, head_dim);
 
-        img_q = apply_rope_2d(ctx, img_q, img_k, pe_img, head_dim, params.theta);
-        txt_q = apply_rope_2d(ctx, txt_q, txt_k, pe_txt, head_dim, params.theta);
+        ggml_tensor * img_q_r = nullptr;
+        ggml_tensor * img_k_r = nullptr;
+        ggml_tensor * txt_q_r = nullptr;
+        ggml_tensor * txt_k_r = nullptr;
+        apply_rope_2d(ctx, img_q, img_k, cos_img, sin_img, head_dim, n_threads, result.rope_ud, &img_q_r, &img_k_r);
+        apply_rope_2d(ctx, txt_q, txt_k, cos_txt, sin_txt, head_dim, n_threads, result.rope_ud, &txt_q_r, &txt_k_r);
+        img_q = img_q_r;
+        img_k = img_k_r;
+        txt_q = txt_q_r;
+        txt_k = txt_k_r;
 
         int img_t = img_tokens;
         int txt_t = txt_tokens;
 
-        ggml_tensor * q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, head_dim, n_heads, txt_t + img_t, 1);
-        ggml_tensor * k = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, head_dim, n_heads, txt_t + img_t, 1);
-        ggml_tensor * v = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, head_dim, n_heads, txt_t + img_t, 1);
+        ggml_tensor * q = ggml_concat(ctx, txt_q, img_q, 2);
+        ggml_tensor * k = ggml_concat(ctx, txt_k, img_k, 2);
+        ggml_tensor * v = ggml_concat(ctx, txt_v, img_v, 2);
 
-        ggml_cpy(ctx, txt_q, ggml_view_4d(ctx, q, head_dim, n_heads, txt_t, 1, q->nb[1], q->nb[2], q->nb[3], 0));
-        ggml_cpy(ctx, img_q, ggml_view_4d(ctx, q, head_dim, n_heads, img_t, 1, q->nb[1], q->nb[2], q->nb[3], txt_t * head_dim * sizeof(float)));
+        ggml_tensor * q_3d = ggml_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));
+        ggml_tensor * k_3d = ggml_cont(ctx, ggml_permute(ctx, k, 0, 2, 1, 3));
+        ggml_tensor * v_3d = ggml_cont(ctx, ggml_permute(ctx, v, 0, 2, 1, 3));
 
-        ggml_cpy(ctx, txt_k, ggml_view_4d(ctx, k, head_dim, n_heads, txt_t, 1, k->nb[1], k->nb[2], k->nb[3], 0));
-        ggml_cpy(ctx, img_k, ggml_view_4d(ctx, k, head_dim, n_heads, img_t, 1, k->nb[1], k->nb[2], k->nb[3], txt_t * head_dim * sizeof(float)));
-
-        ggml_cpy(ctx, txt_v, ggml_view_4d(ctx, v, head_dim, n_heads, txt_t, 1, v->nb[1], v->nb[2], v->nb[3], 0));
-        ggml_cpy(ctx, img_v, ggml_view_4d(ctx, v, head_dim, n_heads, img_t, 1, v->nb[1], v->nb[2], v->nb[3], txt_t * head_dim * sizeof(float)));
-
-        ggml_tensor * q_2d = ggml_cont(ctx, ggml_reshape_2d(ctx, q, head_dim, (txt_t + img_t) * n_heads));
-        ggml_tensor * k_2d = ggml_cont(ctx, ggml_reshape_2d(ctx, k, head_dim, (txt_t + img_t) * n_heads));
-        ggml_tensor * v_2d = ggml_cont(ctx, ggml_reshape_2d(ctx, v, head_dim, (txt_t + img_t) * n_heads));
-
-        ggml_tensor * scores = ggml_mul_mat(ctx, k_2d, q_2d);
+        ggml_tensor * scores = ggml_mul_mat(ctx, k_3d, q_3d);
         float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
-        scores = ggml_scale(ctx, scores, scale);
-        scores = ggml_soft_max_ext(ctx, scores, nullptr, 1.0f, 0.0f);
+        ggml_scale_inplace(ctx, scores, scale);
+        scores = ggml_soft_max_inplace(ctx, scores);
 
-        ggml_tensor * attn = ggml_mul_mat(ctx, ggml_transpose(ctx, v_2d), scores);
-        attn = ggml_cont(ctx, ggml_reshape_4d(ctx, attn, head_dim, txt_t + img_t, n_heads, 1));
-        attn = ggml_permute(ctx, attn, 0, 2, 1, 3);
+        ggml_tensor * attn = ggml_mul_mat(ctx, ggml_cont(ctx, ggml_permute(ctx, scores, 1, 0, 2, 3)), ggml_cont(ctx, ggml_permute(ctx, v_3d, 1, 0, 2, 3)));
+        attn = ggml_cont(ctx, ggml_permute(ctx, attn, 1, 2, 0, 3));
         attn = ggml_cont(ctx, ggml_reshape_2d(ctx, attn, H, txt_t + img_t));
 
         ggml_tensor * img_attn_out = ggml_view_2d(ctx, attn, H, img_t, attn->nb[1], txt_t * H * sizeof(float));
@@ -345,11 +404,9 @@ DiffuserGraph build_diffuser_graph(
         h_txt = ggml_add(ctx, h_txt, ggml_mul(ctx, ggml_repeat(ctx, column_1d(ctx, ggml_cont(ctx, ggml_view_1d(ctx, txt_mod2.gate, H, 0))), txt_mlp_a), txt_mlp_a));
     }
 
-    ggml_tensor * combined = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, H, (txt_tokens + img_tokens));
-    ggml_cpy(ctx, h_txt, ggml_view_2d(ctx, combined, H, txt_tokens, combined->nb[1], 0));
-    ggml_cpy(ctx, h_img, ggml_view_2d(ctx, combined, H, img_tokens, combined->nb[1], txt_tokens * H * sizeof(float)));
+    ggml_tensor * combined = ggml_concat(ctx, h_txt, h_img, 1);
 
-    ggml_tensor * mod_single_raw = b1(vec, weights.single_mod);
+    ggml_tensor * mod_single_raw = b1(vec_silu, weights.single_mod);
     ModSplit single_mod;
     split_mod_single(ctx, mod_single_raw, H, 1, single_mod);
 
@@ -369,33 +426,28 @@ DiffuserGraph build_diffuser_graph(
         qkv.q = rms_norm_qk(ctx, qkv.q, sb.norm_q.data, head_dim);
         qkv.k = rms_norm_qk(ctx, qkv.k, sb.norm_k.data, head_dim);
 
-        ggml_tensor * pe_combined = ggml_concat(ctx, pe_txt, pe_img, 2);
-
-        qkv.q = apply_rope_2d(ctx, qkv.q, qkv.k, pe_combined, head_dim, params.theta);
+        ggml_tensor * q_r = nullptr;
+        ggml_tensor * k_r = nullptr;
+        apply_rope_2d(ctx, qkv.q, qkv.k, cos_combined, sin_combined, head_dim, n_threads, result.rope_ud, &q_r, &k_r);
+        qkv.q = q_r;
+        qkv.k = k_r;
 
         int seq = total_tokens;
-        ggml_tensor * q_2d_a = ggml_cont(ctx, ggml_permute(ctx, qkv.q, 0, 2, 1, 3));
-        ggml_tensor * k_2d_a = ggml_cont(ctx, ggml_permute(ctx, qkv.k, 0, 2, 1, 3));
-        ggml_tensor * v_2d_a = ggml_cont(ctx, ggml_permute(ctx, qkv.v, 0, 2, 1, 3));
+        ggml_tensor * q_3d_a = ggml_cont(ctx, ggml_permute(ctx, qkv.q, 0, 2, 1, 3));
+        ggml_tensor * k_3d_a = ggml_cont(ctx, ggml_permute(ctx, qkv.k, 0, 2, 1, 3));
+        ggml_tensor * v_3d_a = ggml_cont(ctx, ggml_permute(ctx, qkv.v, 0, 2, 1, 3));
 
-        q_2d_a = ggml_cont(ctx, ggml_reshape_2d(ctx, q_2d_a, head_dim, seq * n_heads));
-        k_2d_a = ggml_cont(ctx, ggml_reshape_2d(ctx, k_2d_a, head_dim, seq * n_heads));
-        v_2d_a = ggml_cont(ctx, ggml_reshape_2d(ctx, v_2d_a, head_dim, seq * n_heads));
-
-        ggml_tensor * s_scores = ggml_mul_mat(ctx, k_2d_a, q_2d_a);
+        ggml_tensor * s_scores = ggml_mul_mat(ctx, k_3d_a, q_3d_a);
         float scale_s = 1.0f / std::sqrt(static_cast<float>(head_dim));
-        s_scores = ggml_scale(ctx, s_scores, scale_s);
-        s_scores = ggml_soft_max_ext(ctx, s_scores, nullptr, 1.0f, 0.0f);
+        ggml_scale_inplace(ctx, s_scores, scale_s);
+        s_scores = ggml_soft_max_inplace(ctx, s_scores);
 
-        ggml_tensor * s_attn = ggml_mul_mat(ctx, ggml_transpose(ctx, v_2d_a), s_scores);
-        s_attn = ggml_cont(ctx, ggml_reshape_4d(ctx, s_attn, head_dim, seq, n_heads, 1));
-        s_attn = ggml_permute(ctx, s_attn, 0, 2, 1, 3);
+        ggml_tensor * s_attn = ggml_mul_mat(ctx, ggml_cont(ctx, ggml_permute(ctx, s_scores, 1, 0, 2, 3)), ggml_cont(ctx, ggml_permute(ctx, v_3d_a, 1, 0, 2, 3)));
+        s_attn = ggml_cont(ctx, ggml_permute(ctx, s_attn, 1, 2, 0, 3));
         s_attn = ggml_cont(ctx, ggml_reshape_2d(ctx, s_attn, H, seq));
 
         ggml_tensor * s_mlp_a = mlp_act(ctx, mlp_t, mlp_hd);
-        ggml_tensor * s_cat = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, H + mlp_hd, seq);
-        ggml_cpy(ctx, s_attn, ggml_view_2d(ctx, s_cat, H, seq, s_cat->nb[1], 0));
-        ggml_cpy(ctx, s_mlp_a, ggml_view_2d(ctx, s_cat, mlp_hd, seq, s_cat->nb[1], H * sizeof(float)));
+        ggml_tensor * s_cat = ggml_concat(ctx, s_attn, s_mlp_a, 0);
 
         ggml_tensor * s_out = b1(s_cat, sb.to_out);
 

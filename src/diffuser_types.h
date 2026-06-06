@@ -19,7 +19,7 @@ struct DiffuserParams {
     int depth = 5;
     int depth_single_blocks = 20;
     int axes_dim[4] = {32, 32, 32, 32};
-    int theta = 10000;
+    int theta = 2000;
     float mlp_ratio = 3.0f;
     bool use_guidance_embed = false;
     int mlp_hidden_dim = 0;

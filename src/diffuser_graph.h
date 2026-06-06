@@ -18,6 +18,7 @@ struct DiffuserGraph {
     ggml_tensor * out;
     ggml_cgraph * graph;
     std::vector<B1LinearUserData> b1_ud;
+    std::vector<Rope2DUserData> rope_ud;
 };
 
 DiffuserGraph build_diffuser_graph(

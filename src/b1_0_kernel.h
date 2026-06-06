@@ -105,4 +105,62 @@ inline ggml_tensor * b1_linear(ggml_context * ctx, ggml_tensor * act, const B1We
         n_threads, &ud);
 }
 
+struct Rope2DUserData {
+    int head_dim;
+    int n_heads;
+    int seq;
+};
+
+inline void rope_2d_fwd_f32(ggml_tensor * dst, int ith, int nth, void * userdata) {
+    const auto * ud = (const Rope2DUserData *)userdata;
+    const int head_dim = ud->head_dim;
+    const int n_heads  = ud->n_heads;
+    const int seq      = ud->seq;
+    const int half     = head_dim / 2;
+
+    const ggml_tensor * src_t  = dst->src[0];
+    const ggml_tensor * cos_t  = dst->src[1];
+    const ggml_tensor * sin_t  = dst->src[2];
+
+    const float * src = (const float *)src_t->data;
+    const float * c   = (const float *)cos_t->data;
+    const float * s   = (const float *)sin_t->data;
+    float * out       = (float *)dst->data;
+
+    const int head_stride = n_heads * seq;
+    const int total       = half * n_heads * seq;
+    const int per_thread  = (total + nth - 1) / nth;
+    const int start       = ith * per_thread;
+    const int end         = (start + per_thread > total) ? total : start + per_thread;
+
+    for (int idx = start; idx < end; idx++) {
+        const int d_pair  = idx / (n_heads * seq);
+        const int rem     = idx - d_pair * (n_heads * seq);
+        const int h       = rem / seq;
+        const int s_idx   = rem - h * seq;
+
+        const int even_idx = d_pair * 2 * head_stride + h * seq + s_idx;
+        const int odd_idx  = even_idx + head_stride;
+
+        const int angle_idx = d_pair * seq + s_idx;
+        const float cos_v   = c[angle_idx];
+        const float sin_v   = s[angle_idx];
+
+        const float a = src[even_idx];
+        const float b = src[odd_idx];
+
+        out[even_idx] = a * cos_v - b * sin_v;
+        out[odd_idx]  = a * sin_v + b * cos_v;
+    }
+}
+
+inline ggml_tensor * rope_2d_fwd(ggml_context * ctx, ggml_tensor * x, ggml_tensor * cos_t, ggml_tensor * sin_t, Rope2DUserData & ud) {
+    ggml_tensor * args[] = { x, cos_t, sin_t };
+    return ggml_custom_4d(ctx, GGML_TYPE_F32,
+        (int64_t)ud.head_dim, (int64_t)ud.n_heads, (int64_t)ud.seq, 1,
+        args, 3,
+        rope_2d_fwd_f32,
+        GGML_N_TASKS_MAX, &ud);
+}
+
 } // namespace bonsai
