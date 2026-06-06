@@ -35,3 +35,19 @@ target_include_directories(bonsai_encoder PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/ll
 
 # Install target
 install(TARGETS bonsai_encoder RUNTIME DESTINATION bin)
+
+# --- bonsai_vae: Flux VAE decoder, ggml-only (Step 3 of the pipeline) ---
+add_executable(bonsai_vae
+    src/vae_decoder.cpp
+    src/vae_graph.cpp
+)
+
+target_link_libraries(bonsai_vae PRIVATE ggml ggml-cpu)
+target_include_directories(bonsai_vae PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+)
+
+install(TARGETS bonsai_vae RUNTIME DESTINATION bin)
+
+
