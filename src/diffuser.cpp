@@ -24,6 +24,15 @@ struct WeightLoadInfo {
     size_t offset;
 };
 
+static uint64_t read_string(FILE * f, std::string & out) {
+    uint64_t len;
+    fread(&len, sizeof(len), 1, f);
+    std::vector<char> buf(len);
+    fread(buf.data(), 1, len, f);
+    out.assign(buf.data(), len);
+    return sizeof(uint64_t) + len;
+}
+
 static std::vector<WeightLoadInfo> read_gguf_tensors(const char * fname, size_t & data_offset, size_t & file_size) {
     FILE * f = fopen(fname, "rb");
     if (!f) {
@@ -35,35 +44,75 @@ static std::vector<WeightLoadInfo> read_gguf_tensors(const char * fname, size_t 
     file_size = ftell(f);
     fseek(f, 0, SEEK_SET);
 
-    struct gguf_init_params params = { true, nullptr };
-    struct gguf_context * gctx = gguf_init_from_file(fname, params);
-    if (!gctx) {
-        fclose(f);
-        fprintf(stderr, "error: failed to load GGUF file\n");
+    char magic[4];
+    fread(magic, 1, 4, f);
+    if (memcmp(magic, "GGUF", 4) != 0) {
+        fprintf(stderr, "error: invalid GGUF magic\n");
         exit(1);
     }
 
-    data_offset = gguf_get_data_offset(gctx);
-    int64_t n_tensors = gguf_get_n_tensors(gctx);
+    uint32_t version;
+    fread(&version, sizeof(version), 1, f);
+
+    int64_t n_tensors, n_kv;
+    fread(&n_tensors, sizeof(n_tensors), 1, f);
+    fread(&n_kv, sizeof(n_kv), 1, f);
+
+    for (int64_t i = 0; i < n_kv; i++) {
+        std::string key;
+        read_string(f, key);
+        uint32_t val_type;
+        fread(&val_type, sizeof(val_type), 1, f);
+        switch (val_type) {
+            case 0: { uint8_t v; fread(&v, sizeof(v), 1, f); break; }
+            case 1: { int8_t v; fread(&v, sizeof(v), 1, f); break; }
+            case 2: { uint16_t v; fread(&v, sizeof(v), 1, f); break; }
+            case 3: { int16_t v; fread(&v, sizeof(v), 1, f); break; }
+            case 4: { uint32_t v; fread(&v, sizeof(v), 1, f); break; }
+            case 5: { int32_t v; fread(&v, sizeof(v), 1, f); break; }
+            case 6: { float v; fread(&v, sizeof(v), 1, f); break; }
+            case 7: { int8_t v; fread(&v, sizeof(v), 1, f); break; }
+            case 8: { std::string s; read_string(f, s); break; }
+            case 9: {
+                uint32_t arr_type, arr_n;
+                fread(&arr_type, sizeof(arr_type), 1, f);
+                fread(&arr_n, sizeof(arr_n), 1, f);
+                for (uint32_t j = 0; j < arr_n; j++) {
+                    if (arr_type == 8) { std::string s; read_string(f, s); }
+                    else { uint8_t dummy[8]; fread(dummy, 1, 8, f); }
+                }
+                break;
+            }
+            case 10: { uint64_t v; fread(&v, sizeof(v), 1, f); break; }
+            case 11: { int64_t v; fread(&v, sizeof(v), 1, f); break; }
+            case 12: { double v; fread(&v, sizeof(v), 1, f); break; }
+            default: { uint8_t dummy[64]; fread(dummy, 1, 64, f); break; }
+        }
+    }
 
     std::vector<WeightLoadInfo> infos;
     for (int64_t i = 0; i < n_tensors; i++) {
         WeightLoadInfo info;
-        info.name = gguf_get_tensor_name(gctx, i);
-        info.type = gguf_get_tensor_type(gctx, i);
-        info.offset = gguf_get_tensor_offset(gctx, i);
+        read_string(f, info.name);
 
-        if (info.type == GGML_TYPE_F32) {
-            int n_dims = 2;
-            for (int d = 0; d < 2; d++) {
-                info.ne.push_back(0);
-            }
+        uint32_t n_dims;
+        fread(&n_dims, sizeof(n_dims), 1, f);
+
+        info.ne.resize(n_dims);
+        for (uint32_t d = 0; d < n_dims; d++) {
+            fread(&info.ne[d], sizeof(int64_t), 1, f);
         }
+
+        uint32_t stype;
+        fread(&stype, sizeof(stype), 1, f);
+        info.type = (enum ggml_type)stype;
+
+        fread(&info.offset, sizeof(size_t), 1, f);
 
         infos.push_back(info);
     }
 
-    gguf_free(gctx);
+    data_offset = ftell(f);
     fclose(f);
     return infos;
 }
@@ -117,7 +166,7 @@ static void find_b1_weights(
     w.in_dim = in_dim;
     w.out_dim = out_dim;
     size_t nbytes = b1_nbytes(in_dim, out_dim);
-    w.data = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, nbytes, 1);
+    w.data = ggml_new_tensor_2d(ctx, GGML_TYPE_I8, nbytes, 1);
     w.data->data = malloc(nbytes);
 
     for (const auto & info : infos) {
@@ -153,7 +202,7 @@ static void find_f32_weight(
     memset(w.data->data, 0, n * sizeof(float));
 }
 
-static void find_f32_bias(
+static void find_f32_weight_optional(
     FILE * f,
     size_t data_offset,
     const std::vector<WeightLoadInfo> & infos,
@@ -162,7 +211,15 @@ static void find_f32_bias(
     FPWeights & w,
     int n)
 {
-    find_f32_weight(f, data_offset, infos, ctx, name, w, n);
+    for (const auto & info : infos) {
+        if (info.name == name) {
+            w.data = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n);
+            w.data->data = malloc(n * sizeof(float));
+            read_weight_data(f, w.data, data_offset, info.offset, n * sizeof(float));
+            return;
+        }
+    }
+    w.data = nullptr;
 }
 
 static void load_diffuser_weights(
@@ -182,9 +239,9 @@ static void load_diffuser_weights(
     find_b1_weights(f, data_offset, infos, ctx, "context_embedder.weight", w.txt_in, ctx_dim, H);
 
     find_f32_weight(f, data_offset, infos, ctx, "time_guidance_embed.timestep_embedder.linear_1.weight", w.time_in_w1, 256 * H);
-    find_f32_bias(f, data_offset, infos, ctx, "time_guidance_embed.timestep_embedder.linear_1.bias", w.time_in_b1, H);
+    find_f32_weight_optional(f, data_offset, infos, ctx, "time_guidance_embed.timestep_embedder.linear_1.bias", w.time_in_b1, H);
     find_f32_weight(f, data_offset, infos, ctx, "time_guidance_embed.timestep_embedder.linear_2.weight", w.time_in_w2, H * H);
-    find_f32_bias(f, data_offset, infos, ctx, "time_guidance_embed.timestep_embedder.linear_2.bias", w.time_in_b2, H);
+    find_f32_weight_optional(f, data_offset, infos, ctx, "time_guidance_embed.timestep_embedder.linear_2.bias", w.time_in_b2, H);
 
     find_b1_weights(f, data_offset, infos, ctx, "double_stream_img.linear.weight", w.double_mod_img, H, 6 * H);
     find_b1_weights(f, data_offset, infos, ctx, "double_stream_txt.linear.weight", w.double_mod_txt, H, 6 * H);

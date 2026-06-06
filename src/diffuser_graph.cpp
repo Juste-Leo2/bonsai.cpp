@@ -186,8 +186,11 @@ DiffuserGraph build_diffuser_graph(
     ggml_tensor * h_txt = b1(result.txt_in, weights.txt_in);
 
     ggml_tensor * te = ggml_timestep_embedding(ctx, result.timestep, 256, 10000);
-    te = ggml_silu(ctx, ggml_add(ctx, ggml_mul_mat(ctx, weights.time_in_w1.data, te), column_1d(ctx, weights.time_in_b1.data)));
-    ggml_tensor * vec = ggml_add(ctx, ggml_mul_mat(ctx, weights.time_in_w2.data, te), column_1d(ctx, weights.time_in_b2.data));
+    te = ggml_mul_mat(ctx, weights.time_in_w1.data, te);
+    if (weights.time_in_b1.data) te = ggml_add(ctx, te, column_1d(ctx, weights.time_in_b1.data));
+    te = ggml_silu(ctx, te);
+    ggml_tensor * vec = ggml_mul_mat(ctx, weights.time_in_w2.data, te);
+    if (weights.time_in_b2.data) vec = ggml_add(ctx, vec, column_1d(ctx, weights.time_in_b2.data));
 
     ggml_tensor * mod_img_raw = b1(vec, weights.double_mod_img);
     ggml_tensor * mod_txt_raw = b1(vec, weights.double_mod_txt);
