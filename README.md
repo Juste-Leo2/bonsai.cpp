@@ -17,19 +17,24 @@ Running large diffusion models (like Flux or SD3) on mobile GPUs often leads to 
 ## Pipeline Architecture
 
 ### Step 1: Text Encoder (`llama.cpp` wrapper)
+- [x] Implemented
+
 Instead of reinventing the wheel, we compile only the essential elements of `llama.cpp`. 
 - Loads the LLM (e.g., Qwen3 4B).
 - Performs a single forward pass to extract the hidden states (embeddings).
 - Instantly destroys the instance and frees the memory.
 
 ### Step 2: Custom Diffuser Engine
+- [ ] Implemented
 - **Custom GGUF:** The original safetensors are converted into a heavily stripped-down, custom `.gguf` format containing only the required DiT tensors.
 - **Bare-metal Engine:** Built directly on top of the `ggml` library.
 - **1-Bit Optimization:** Designed to maximize the speed of 1-bit (`q1_0`) quantized tensors (using look-up tables or specialized grouped matrix operations).
 - **Vulkan Chunking:** Memory allocations are manually chunked to bypass Adreno driver limitations.
 
 ### Step 3: VAE Decoder
+- [x] Implemented
+
 The final step transforms the denoised latent tensor into a PNG image.
-Depending on the final implementation, this will either use a stripped-down `AutoEncoderKL` C++ class (extracted from `stable-diffusion.cpp`) or an exported ONNX/TFLite model running directly on the mobile CPU/NPU.
+**Implementation:** The VAE decoder graph (`post_quant_conv`, `conv_in`, `mid_block`, 4 `up_blocks`, `conv_out`) is built from scratch using only the `ggml` library — no dependencies on `stable-diffusion.cpp`, ONNX, or TFLite. Weights are loaded directly from `.safetensors` files and executed via `ggml_graph_compute` on CPU (with Vulkan/GPU planned).
 
 **License: MIT**
