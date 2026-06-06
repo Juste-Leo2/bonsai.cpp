@@ -50,4 +50,18 @@ target_include_directories(bonsai_vae PRIVATE
 
 install(TARGETS bonsai_vae RUNTIME DESTINATION bin)
 
+# --- bonsai_diffuser: B1_0 quantized Flux diffusion engine (Step 2 of the pipeline) ---
+add_executable(bonsai_diffuser
+    src/diffuser.cpp
+    src/diffuser_graph.cpp
+)
+
+target_link_libraries(bonsai_diffuser PRIVATE ggml ggml-cpu)
+target_include_directories(bonsai_diffuser PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+)
+
+install(TARGETS bonsai_diffuser RUNTIME DESTINATION bin)
+
 
