@@ -362,8 +362,10 @@ int main(int argc, char ** argv) {
     for (int y = 0; y < H; y++) {
         for (int x = 0; x < W; x++) {
             int idx = y * W + x;
-            img_ids[0 * img_tokens + idx] = (float)y;
-            img_ids[1 * img_tokens + idx] = (float)x;
+            img_ids[idx * 4 + 0] = 0.0f;
+            img_ids[idx * 4 + 1] = 0.0f;
+            img_ids[idx * 4 + 2] = (float)y;
+            img_ids[idx * 4 + 3] = (float)x;
         }
     }
 
@@ -386,9 +388,36 @@ int main(int argc, char ** argv) {
         memcpy(dg.img_ids->data, img_ids.data(), img_ids.size() * sizeof(float));
         memcpy(dg.txt_ids->data, txt_ids.data(), txt_ids.size() * sizeof(float));
 
+        {
+            int nan_in = 0, inf_in = 0;
+            for (size_t i = 0; i < latents.size(); i++) {
+                if (std::isnan(latents[i])) nan_in++;
+                if (std::isinf(latents[i])) inf_in++;
+            }
+            for (size_t i = 0; i < txt_emb.size(); i++) {
+                if (std::isnan(txt_emb[i])) nan_in++;
+                if (std::isinf(txt_emb[i])) inf_in++;
+            }
+            fprintf(stdout, "  inputs: latents nan=%d inf=%d  txt_emb nan=%d inf=%d  t=%f\n",
+                nan_in, inf_in, 0, 0, t);
+        }
+
         ggml_graph_compute_with_ctx(ctx, dg.graph, n_threads);
 
         float * noise_pred = (float *)dg.out->data;
+
+        int nan_count = 0, inf_count = 0;
+        float mn = 1e30f, mx = -1e30f, sum = 0.0f;
+        for (int i = 0; i < C * img_tokens; i++) {
+            float v = noise_pred[i];
+            if (std::isnan(v)) nan_count++;
+            if (std::isinf(v)) inf_count++;
+            mn = std::min(mn, v);
+            mx = std::max(mx, v);
+            sum += v;
+        }
+        fprintf(stdout, "  step %3d/%d: out stats: nan=%d inf=%d min=%.4f max=%.4f mean=%.4f\n",
+            step + 1, steps, nan_count, inf_count, mn, mx, sum / (C * img_tokens));
 
         for (int i = 0; i < C * img_tokens; i++) {
             latents[i] = latents[i] + dt * noise_pred[i];

@@ -248,8 +248,8 @@ DiffuserGraph build_diffuser_graph(
     result.img_in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, params.in_channels, img_tokens * batch);
     result.txt_in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, params.context_in_dim, txt_tokens * batch);
     result.timestep = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
-    result.img_ids = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, img_tokens * batch);
-    result.txt_ids = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, txt_tokens * batch);
+    result.img_ids = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, img_tokens * batch, 4);
+    result.txt_ids = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, txt_tokens * batch, 4);
 
     ggml_set_input(result.img_in);
     ggml_set_input(result.txt_in);

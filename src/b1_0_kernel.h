@@ -139,8 +139,13 @@ inline void rope_2d_fwd_f32(ggml_tensor * dst, int ith, int nth, void * userdata
         const int h       = rem / seq;
         const int s_idx   = rem - h * seq;
 
-        const int even_idx = d_pair * 2 * head_stride + h * seq + s_idx;
-        const int odd_idx  = even_idx + head_stride;
+        const int d_even = d_pair * 2;
+        const int d_odd  = d_even + 1;
+
+        // GGML storage for [head_dim, n_heads, seq]: x[d + h*D + s*D*H]
+        const int base    = h * head_dim + s_idx * (head_dim * n_heads);
+        const int even_idx = d_even + base;
+        const int odd_idx  = d_odd  + base;
 
         const int angle_idx = d_pair * seq + s_idx;
         const float cos_v   = c[angle_idx];
@@ -152,6 +157,7 @@ inline void rope_2d_fwd_f32(ggml_tensor * dst, int ith, int nth, void * userdata
         out[even_idx] = a * cos_v - b * sin_v;
         out[odd_idx]  = a * sin_v + b * cos_v;
     }
+    (void)head_stride;
 }
 
 inline ggml_tensor * rope_2d_fwd(ggml_context * ctx, ggml_tensor * x, ggml_tensor * cos_t, ggml_tensor * sin_t, Rope2DUserData & ud) {
