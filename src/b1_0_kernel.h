@@ -169,7 +169,9 @@ inline void rope_2d_fwd_f32(ggml_tensor * dst, int ith, int nth, void * userdata
         const int even_idx = d_even + base;
         const int odd_idx  = d_odd  + base;
 
-        const int angle_idx = d_pair * seq + s_idx;
+        // cos/sin tensor is [head_dim/2, seq] in GGML column-major:
+        //   data[d + s * (head_dim/2)]
+        const int angle_idx = d_pair + s_idx * (head_dim / 2);
         const float cos_v   = c[angle_idx];
         const float sin_v   = s[angle_idx];
 

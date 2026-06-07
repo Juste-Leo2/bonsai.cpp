@@ -150,11 +150,13 @@ static void build_rope_cos_sin(
     ggml_tensor ** cos_out,
     ggml_tensor ** sin_out)
 {
-    // ids: [n_axes, seq]
+    // ids: [n_axes, seq] (ne[0]=n_axes, ne[1]=seq, column-major)
+    //   data layout: ids[a + s*n_axes] for axis a, token s
     // freqs_table: [max_half, n_axes]
+    //   data layout: freqs[d + a*max_half] for freq d, axis a
     // For each axis a:
-    //   axis_ids:  [seq] (view)
-    //   axis_freqs: [ax_half, 1] (view)
+    //   axis_ids:  [1, seq] (view with stride n_axes*sizeof(float))
+    //   axis_freqs: [1, ax_half] (view)
     //   angles_a:  [ax_half, seq] = mul(axis_freqs, axis_ids)
     // Concat axes -> [head_dim/2, seq]
     int seq = ids->ne[1];
@@ -162,10 +164,13 @@ static void build_rope_cos_sin(
     ggml_tensor * all_angles = nullptr;
     for (int a = 0; a < n_axes; a++) {
         int ax_half = axes_dim[a] / 2;
-        ggml_tensor * axis_ids = ggml_view_1d(ctx, ids, seq, (size_t)a * seq * sizeof(float));
+        // axis_ids: stride between rows = n_axes*sizeof(float), offset = a*sizeof(float)
+        ggml_tensor * axis_ids = ggml_view_2d(ctx, ids, 1, seq,
+            (size_t)ids->ne[0] * sizeof(float), (size_t)a * sizeof(float));
+        ggml_tensor * axis_ids_c = ggml_cont(ctx, axis_ids);
         ggml_tensor * axis_freqs = ggml_view_1d(ctx, freqs_table, ax_half,
             (size_t)a * freqs_table->ne[0] * sizeof(float));
-        ggml_tensor * axis_ids_2d  = ggml_reshape_2d(ctx, axis_ids,  1,     seq);
+        ggml_tensor * axis_ids_2d  = ggml_reshape_2d(ctx, axis_ids_c, 1,     seq);
         ggml_tensor * axis_freqs_2d = ggml_reshape_2d(ctx, axis_freqs, 1,     ax_half);
         ggml_tensor * angles = ggml_mul_mat(ctx, axis_freqs_2d, axis_ids_2d);
         if (all_angles == nullptr) {
@@ -260,8 +265,8 @@ DiffuserGraph build_diffuser_graph(
     result.img_in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, params.in_channels, img_tokens * batch);
     result.txt_in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, params.context_in_dim, txt_tokens * batch);
     result.timestep = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
-    result.img_ids = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, img_tokens * batch, 4);
-    result.txt_ids = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, txt_tokens * batch, 4);
+    result.img_ids = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, img_tokens * batch);
+    result.txt_ids = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, txt_tokens * batch);
 
     ggml_set_input(result.img_in);
     ggml_set_input(result.txt_in);
