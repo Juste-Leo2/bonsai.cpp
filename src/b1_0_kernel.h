@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 
 namespace bonsai {
 
@@ -50,9 +51,23 @@ inline void b1_linear_f32_f32(ggml_tensor * dst, int ith, int nth, void * userda
     const ggml_tensor * act_t = dst->src[0];
     const ggml_tensor * w_t = dst->src[1];
 
+    if (ith == 0 && !w_t->data) {
+        fprintf(stderr, "B1_SEGFAULT: w_t->data is null! in_dim=%d out_dim=%d act_ne=[%lld,%lld,%lld,%lld] w_t_ne=[%lld,%lld,%lld,%lld] act_data=%p\n",
+            in_dim, out_dim,
+            (long long)act_t->ne[0], (long long)act_t->ne[1], (long long)act_t->ne[2], (long long)act_t->ne[3],
+            (long long)w_t->ne[0], (long long)w_t->ne[1], (long long)w_t->ne[2], (long long)w_t->ne[3],
+            act_t->data);
+    }
+
     const float * act = (const float *)act_t->data;
     const uint8_t * w = (const uint8_t *)w_t->data;
     float * out = (float *)dst->data;
+
+    if (ith == 0) {
+        fprintf(stderr, "B1_DBG: in_dim=%d out_dim=%d num_blocks=%d row_stride=%d nbytes=%lld act_data=%p w_data=%p out_data=%p\n",
+            in_dim, out_dim, in_dim/32, (in_dim/32)*6,
+            (long long)w_t->ne[0], (void*)act, (void*)w, (void*)out);
+    }
 
     const int batch = (int)act_t->ne[1];
     const int num_blocks = in_dim / B1_0_BLOCK_SIZE;
@@ -88,6 +103,13 @@ inline void b1_linear_f32_f32(ggml_tensor * dst, int ith, int nth, void * userda
                 sum += scale * block_sum;
             }
 
+            float fsum = sum;
+            if (ith == 0 && (std::isnan(fsum) || std::isinf(fsum))) {
+                fprintf(stderr, "B1_NAN: in_dim=%d out_dim=%d r=%d b=%d act_nan=%d w_nan=%d\n",
+                    in_dim, out_dim, r, b,
+                    std::isnan(act[r * batch + b]) || std::isinf(act[r * batch + b]),
+                    std::isnan(((const float*)w_t->data)[0]) || std::isinf(((const float*)w_t->data)[0]));
+            }
             out[r * batch + b] = sum;
         }
     }

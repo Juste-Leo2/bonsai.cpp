@@ -243,6 +243,18 @@ DiffuserGraph build_diffuser_graph(
     int mlp_hd = params.mlp_hidden_dim;
     int total_tokens = img_tokens + txt_tokens;
 
+    // Pre-reserve userdata vectors to prevent reallocation invalidating
+    // pointers passed to ggml_custom_4d as userdata.
+    // Counts: 4 (h_img, h_txt, mod_img, mod_txt) +
+    //         12 * params.depth (double blocks) +
+    //         1 (mod_single) + 2 * params.depth_single_blocks (single blocks) +
+    //         2 (norm_out, proj_out) = 7 + 12*depth + 2*depth_single_blocks
+    result.b1_ud.reserve(7 + 12 * params.depth + 2 * params.depth_single_blocks + 16);
+    // Each apply_rope_2d call pushes 2 entries (one for q, one for k).
+    // Double block: 2 apply_rope_2d calls (img + txt) * 2 = 4 pushes per block.
+    // Single block: 1 apply_rope_2d call * 2 = 2 pushes per block.
+    result.rope_ud.reserve(4 * params.depth + 2 * params.depth_single_blocks + 16);
+
     result.graph = ggml_new_graph_custom(ctx, 65536, false);
 
     result.img_in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, params.in_channels, img_tokens * batch);
