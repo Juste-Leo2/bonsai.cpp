@@ -113,6 +113,9 @@ static std::vector<WeightLoadInfo> read_gguf_tensors(const char * fname, size_t 
     }
 
     data_offset = ftell(f);
+    size_t alignment = 32; // Default GGUF alignment
+    size_t padding = (alignment - (data_offset % alignment)) % alignment;
+    data_offset += padding;
     fclose(f);
     return infos;
 }
@@ -175,8 +178,8 @@ static void find_b1_weights(
             return;
         }
     }
-    fprintf(stderr, "warning: weight '%s' not found in GGUF, using zeros\n", name.c_str());
-    memset(w.data->data, 0, nbytes);
+    fprintf(stderr, "FATAL ERROR: required B1 weight '%s' not found in GGUF!\n", name.c_str());
+    abort();
 }
 
 static void find_f32_weight(
@@ -193,13 +196,36 @@ static void find_f32_weight(
 
     for (const auto & info : infos) {
         if (info.name == name) {
-            size_t nbytes = n * sizeof(float);
-            read_weight_data(f, w.data, data_offset, info.offset, nbytes);
+            if (info.type == GGML_TYPE_F32) {
+                size_t nbytes = n * sizeof(float);
+                read_weight_data(f, w.data, data_offset, info.offset, nbytes);
+                if (name == "transformer_blocks.0.attn.norm_q.weight") {
+                    float * d = (float *)w.data->data;
+                    fprintf(stderr, "DEBUG_NORM_Q GGUF LOAD F32: %f %f %f\n", d[0], d[1], d[2]);
+                }
+            } else if (info.type == GGML_TYPE_F16) {
+                size_t nbytes = n * sizeof(uint16_t);
+                std::vector<uint16_t> temp(n);
+                fseek(f, data_offset + info.offset, SEEK_SET);
+                size_t read = fread(temp.data(), 1, nbytes, f);
+                float * out = (float *)w.data->data;
+                for (int i = 0; i < n; i++) out[i] = ggml_fp16_to_fp32(temp[i]);
+            } else if (info.type == GGML_TYPE_BF16) {
+                size_t nbytes = n * sizeof(uint16_t);
+                std::vector<uint16_t> temp(n);
+                fseek(f, data_offset + info.offset, SEEK_SET);
+                size_t read = fread(temp.data(), 1, nbytes, f);
+                float * out = (float *)w.data->data;
+                for (int i = 0; i < n; i++) out[i] = ggml_bf16_to_fp32(ggml_bf16_t{temp[i]});
+            } else {
+                fprintf(stderr, "ERROR: unsupported type %d for %s\n", info.type, name.c_str());
+                abort();
+            }
             return;
         }
     }
-    fprintf(stderr, "warning: weight '%s' not found in GGUF\n", name.c_str());
-    memset(w.data->data, 0, n * sizeof(float));
+    fprintf(stderr, "FATAL ERROR: required weight '%s' not found in GGUF!\n", name.c_str());
+    abort();
 }
 
 static void find_f32_weight_optional(
@@ -215,7 +241,27 @@ static void find_f32_weight_optional(
         if (info.name == name) {
             w.data = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n);
             w.data->data = malloc(n * sizeof(float));
-            read_weight_data(f, w.data, data_offset, info.offset, n * sizeof(float));
+            if (info.type == GGML_TYPE_F32) {
+                size_t nbytes = n * sizeof(float);
+                read_weight_data(f, w.data, data_offset, info.offset, nbytes);
+            } else if (info.type == GGML_TYPE_F16) {
+                size_t nbytes = n * sizeof(uint16_t);
+                std::vector<uint16_t> temp(n);
+                fseek(f, data_offset + info.offset, SEEK_SET);
+                size_t read = fread(temp.data(), 1, nbytes, f);
+                float * out = (float *)w.data->data;
+                for (int i = 0; i < n; i++) out[i] = ggml_fp16_to_fp32(temp[i]);
+            } else if (info.type == GGML_TYPE_BF16) {
+                size_t nbytes = n * sizeof(uint16_t);
+                std::vector<uint16_t> temp(n);
+                fseek(f, data_offset + info.offset, SEEK_SET);
+                size_t read = fread(temp.data(), 1, nbytes, f);
+                float * out = (float *)w.data->data;
+                for (int i = 0; i < n; i++) out[i] = ggml_bf16_to_fp32(ggml_bf16_t{temp[i]});
+            } else {
+                fprintf(stderr, "ERROR: unsupported type %d for %s\n", info.type, name.c_str());
+                abort();
+            }
             return;
         }
     }
@@ -326,7 +372,7 @@ int main(int argc, char ** argv) {
     int img_tokens = H * W;
     int txt_tokens = 512;
 
-    size_t ctx_size = 12ULL * 1024 * 1024 * 1024;
+    size_t ctx_size = 13ULL * 1024 * 1024 * 1024;
     std::vector<uint8_t> buf(ctx_size);
     struct ggml_init_params gparams = {
         /*.mem_size   =*/ ctx_size,

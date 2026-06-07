@@ -346,6 +346,7 @@ DiffuserGraph build_diffuser_graph(
         txt_n = ggml_add(ctx, ggml_mul(ctx, txt_n, ggml_add(ctx, ggml_repeat(ctx, ggml_cont(ctx, ggml_view_1d(ctx, txt_mod1.scale, H, 0)), txt_n), ones)), ggml_repeat(ctx, ggml_cont(ctx, ggml_view_1d(ctx, txt_mod1.shift, H, 0)), txt_n));
 
         ggml_tensor * img_q = b1(img_n, db.attn_to_q);
+        img_q = debug_check(ctx, img_q, "img_q_first", nullptr);
         ggml_tensor * img_k = b1(img_n, db.attn_to_k);
         ggml_tensor * img_v = b1(img_n, db.attn_to_v);
 
@@ -362,6 +363,7 @@ DiffuserGraph build_diffuser_graph(
         txt_v = ggml_cont(ctx, ggml_reshape_3d(ctx, txt_v, head_dim, n_heads, txt_tokens));
 
         img_q = rms_norm_qk(ctx, img_q, db.attn_norm_q.data, head_dim);
+        img_q = debug_check(ctx, img_q, "img_q_rms", nullptr);
         img_k = rms_norm_qk(ctx, img_k, db.attn_norm_k.data, head_dim);
         txt_q = rms_norm_qk(ctx, txt_q, db.attn_norm_added_q.data, head_dim);
         txt_k = rms_norm_qk(ctx, txt_k, db.attn_norm_added_k.data, head_dim);
@@ -395,15 +397,17 @@ DiffuserGraph build_diffuser_graph(
         ggml_tensor * v_3d = ggml_cont(ctx, ggml_permute(ctx, v, 0, 2, 1, 3));
 
         ggml_tensor * scores = ggml_mul_mat(ctx, k_3d, q_3d);
+        scores = debug_check(ctx, scores, "db_scores_raw", nullptr);
         float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
         ggml_scale_inplace(ctx, scores, scale);
-        debug_check(ctx, scores, "scores_scaled", nullptr);
+        scores = debug_check(ctx, scores, "scores_scaled", nullptr);
         scores = ggml_soft_max_inplace(ctx, scores);
         debug_check(ctx, scores, "scores_softmaxed", nullptr);
 
-        ggml_tensor * attn = ggml_mul_mat(ctx, ggml_cont(ctx, ggml_permute(ctx, scores, 1, 0, 2, 3)), ggml_cont(ctx, ggml_permute(ctx, v_3d, 1, 0, 2, 3)));
-        attn = ggml_cont(ctx, ggml_permute(ctx, attn, 1, 2, 0, 3));
-        attn = ggml_cont(ctx, ggml_reshape_2d(ctx, attn, H, txt_t + img_t));
+        ggml_tensor * v_3d_t = ggml_cont(ctx, ggml_permute(ctx, v_3d, 1, 0, 2, 3));
+        ggml_tensor * attn = ggml_mul_mat(ctx, v_3d_t, scores);
+        attn = ggml_cont(ctx, ggml_permute(ctx, attn, 0, 2, 1, 3));
+        attn = ggml_reshape_2d(ctx, attn, H, txt_t + img_t);
 
         ggml_tensor * img_attn_out = ggml_view_2d(ctx, attn, H, img_t, attn->nb[1], txt_t * H * sizeof(float));
         ggml_tensor * txt_attn_out = ggml_view_2d(ctx, attn, H, txt_t, attn->nb[1], 0);
@@ -451,6 +455,7 @@ DiffuserGraph build_diffuser_graph(
         x_n = ggml_add(ctx, ggml_mul(ctx, x_n, ggml_add(ctx, ggml_repeat(ctx, column_1d(ctx, ggml_cont(ctx, ggml_view_1d(ctx, single_mod.scale, H, 0))), x_n), ones)), ggml_repeat(ctx, column_1d(ctx, ggml_cont(ctx, ggml_view_1d(ctx, single_mod.shift, H, 0))), x_n));
 
         ggml_tensor * proj_all = b1(x_n, sb.to_qkv_mlp_proj);
+        proj_all = debug_check(ctx, proj_all, "sb_proj_all", nullptr);
         int qkv_dim = 3 * H;
         ggml_tensor * qkv_t = ggml_view_2d(ctx, proj_all, qkv_dim, total_tokens, proj_all->nb[1], 0);
         ggml_tensor * mlp_t = ggml_view_2d(ctx, proj_all, mlp_hd * 2, total_tokens, proj_all->nb[1], qkv_dim * sizeof(float));
@@ -458,7 +463,9 @@ DiffuserGraph build_diffuser_graph(
         QKV qkv = split_qkv(ctx, qkv_t, H, n_heads, total_tokens);
 
         qkv.q = rms_norm_qk(ctx, qkv.q, sb.norm_q.data, head_dim);
+        qkv.q = debug_check(ctx, qkv.q, "sb_qkv_q_norm", nullptr);
         qkv.k = rms_norm_qk(ctx, qkv.k, sb.norm_k.data, head_dim);
+        qkv.k = debug_check(ctx, qkv.k, "sb_qkv_k_norm", nullptr);
 
         ggml_tensor * q_r = nullptr;
         ggml_tensor * k_r = nullptr;
@@ -472,13 +479,16 @@ DiffuserGraph build_diffuser_graph(
         ggml_tensor * v_3d_a = ggml_cont(ctx, ggml_permute(ctx, qkv.v, 0, 2, 1, 3));
 
         ggml_tensor * s_scores = ggml_mul_mat(ctx, k_3d_a, q_3d_a);
+        s_scores = debug_check(ctx, s_scores, "s_scores_raw", nullptr);
         float scale_s = 1.0f / std::sqrt(static_cast<float>(head_dim));
         ggml_scale_inplace(ctx, s_scores, scale_s);
+        s_scores = debug_check(ctx, s_scores, "s_scores_scaled", nullptr);
         s_scores = ggml_soft_max_inplace(ctx, s_scores);
 
-        ggml_tensor * s_attn = ggml_mul_mat(ctx, ggml_cont(ctx, ggml_permute(ctx, s_scores, 1, 0, 2, 3)), ggml_cont(ctx, ggml_permute(ctx, v_3d_a, 1, 0, 2, 3)));
-        s_attn = ggml_cont(ctx, ggml_permute(ctx, s_attn, 1, 2, 0, 3));
-        s_attn = ggml_cont(ctx, ggml_reshape_2d(ctx, s_attn, H, seq));
+        ggml_tensor * v_3d_a_t = ggml_cont(ctx, ggml_permute(ctx, v_3d_a, 1, 0, 2, 3));
+        ggml_tensor * s_attn = ggml_mul_mat(ctx, v_3d_a_t, s_scores);
+        s_attn = ggml_cont(ctx, ggml_permute(ctx, s_attn, 0, 2, 1, 3));
+        s_attn = ggml_reshape_2d(ctx, s_attn, H, seq);
 
         ggml_tensor * s_mlp_a = mlp_act(ctx, mlp_t, mlp_hd);
         ggml_tensor * s_cat = ggml_concat(ctx, s_attn, s_mlp_a, 0);

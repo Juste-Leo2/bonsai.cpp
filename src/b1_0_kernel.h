@@ -67,6 +67,14 @@ inline void b1_linear_f32_f32(ggml_tensor * dst, int ith, int nth, void * userda
         fprintf(stderr, "B1_DBG: in_dim=%d out_dim=%d num_blocks=%d row_stride=%d nbytes=%lld act_data=%p w_data=%p out_data=%p\n",
             in_dim, out_dim, in_dim/32, (in_dim/32)*6,
             (long long)w_t->ne[0], (void*)act, (void*)w, (void*)out);
+
+        // Check for NaN in input (only thread 0 checks first batch to save time)
+        for (int i = 0; i < in_dim; i++) {
+            if (std::isnan(act[i])) {
+                fprintf(stderr, "B1_FATAL: act_data contains NaN in b1_linear! in_dim=%d out_dim=%d\n", in_dim, out_dim);
+                abort();
+            }
+        }
     }
 
     const int batch = (int)act_t->ne[1];
@@ -103,12 +111,9 @@ inline void b1_linear_f32_f32(ggml_tensor * dst, int ith, int nth, void * userda
                 sum += scale * block_sum;
             }
 
-            float fsum = sum;
-            if (ith == 0 && (std::isnan(fsum) || std::isinf(fsum))) {
-                fprintf(stderr, "B1_NAN: in_dim=%d out_dim=%d r=%d b=%d act_nan=%d w_nan=%d\n",
-                    in_dim, out_dim, r, b,
-                    std::isnan(act[r * batch + b]) || std::isinf(act[r * batch + b]),
-                    std::isnan(((const float*)w_t->data)[0]) || std::isinf(((const float*)w_t->data)[0]));
+            if (std::isnan(sum) || std::isinf(sum)) {
+                fprintf(stderr, "B1_FATAL_OUT: NaN generated in b1_linear! in_dim=%d out_dim=%d r=%d b=%d\n", in_dim, out_dim, r, b);
+                abort();
             }
             out[r * batch + b] = sum;
         }
@@ -202,6 +207,7 @@ inline void debug_check_fwd_f32(ggml_tensor * dst, int ith, int nth, void * user
     const auto * ud = (const DebugCheckUserData *)userdata;
     const ggml_tensor * src_t = dst->src[0];
     const float * src = (const float *)src_t->data;
+    float * out = (float *)dst->data;
     const int n = (int)ggml_nelements(src_t);
     int nan_c = 0, inf_c = 0;
     float mn = 1e30f, mx = -1e30f;
@@ -212,17 +218,23 @@ inline void debug_check_fwd_f32(ggml_tensor * dst, int ith, int nth, void * user
         if (v < mn) mn = v;
         if (v > mx) mx = v;
     }
-    fprintf(stderr, "[CHK %s] n=%d nan=%d inf=%d min=%.4f max=%.4f\n",
-        ud->label, n, nan_c, inf_c, mn, mx);
+    if (ith == 0) {
+        fprintf(stderr, "[CHK %s] n=%d nan=%d inf=%d min=%.4f max=%.4f\n",
+            ud->label, n, nan_c, inf_c, mn, mx);
+    }
     if (ud->counter) (*ud->counter)++;
-    (void)dst;
+    if (dst->data != src_t->data) {
+        memcpy(out, src, ggml_nbytes(src_t));
+    }
 }
 
 inline ggml_tensor * debug_check(ggml_context * ctx, ggml_tensor * x, const char * label, int * counter) {
-    DebugCheckUserData ud{label, counter};
+    DebugCheckUserData * ud = (DebugCheckUserData *)malloc(sizeof(DebugCheckUserData));
+    ud->label = label;
+    ud->counter = counter;
     ggml_tensor * args[] = { x };
-    return ggml_custom_4d(ctx, GGML_TYPE_F32, 1, 1, 1, 1,
-        args, 1, debug_check_fwd_f32, GGML_N_TASKS_MAX, &ud);
+    return ggml_custom_4d(ctx, x->type, x->ne[0], x->ne[1], x->ne[2], x->ne[3],
+        args, 1, debug_check_fwd_f32, 1, ud);
 }
 
 } // namespace bonsai
