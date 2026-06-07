@@ -404,6 +404,32 @@ int main(int argc, char ** argv) {
 
         ggml_graph_compute_with_ctx(ctx, dg.graph, n_threads);
 
+        {
+            static const char * names[] = {
+                "te_emb", "te_w1", "te_pre_silu", "te_post_silu", "vec", "vec_final"
+            };
+            for (int n = 0; n < (int)(sizeof(names)/sizeof(names[0])); n++) {
+                ggml_tensor * t = ggml_graph_get_tensor(dg.graph, names[n]);
+                if (t && t->data) {
+                    const float * p = (const float *)t->data;
+                    int nn = (int)ggml_nelements(t);
+                    int nan_c = 0, inf_c = 0;
+                    float mn = 1e30f, mx = -1e30f;
+                    for (int i = 0; i < nn; i++) {
+                        if (std::isnan(p[i])) nan_c++;
+                        if (std::isinf(p[i])) inf_c++;
+                        if (p[i] < mn) mn = p[i];
+                        if (p[i] > mx) mx = p[i];
+                    }
+                    fprintf(stdout, "  [%s] n=%d nan=%d inf=%d min=%.4f max=%.4f\n",
+                        names[n], nn, nan_c, inf_c, mn, mx);
+                } else {
+                    fprintf(stdout, "  [%s] not found\n", names[n]);
+                }
+            }
+        }
+
+
         float * noise_pred = (float *)dg.out->data;
 
         int nan_count = 0, inf_count = 0;

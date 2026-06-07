@@ -268,13 +268,19 @@ DiffuserGraph build_diffuser_graph(
     ggml_tensor * h_txt = b1(result.txt_in, weights.txt_in);
 
     ggml_tensor * te = ggml_timestep_embedding(ctx, result.timestep, 256, 10000);
+    ggml_format_name(te, "te_emb");
     ggml_tensor * w1_2d = ggml_reshape_2d(ctx, weights.time_in_w1.data, 256, H);
     te = ggml_mul_mat(ctx, w1_2d, te);
+    ggml_format_name(te, "te_w1");
     if (weights.time_in_b1.data) te = ggml_add(ctx, te, column_1d(ctx, weights.time_in_b1.data));
+    ggml_format_name(te, "te_pre_silu");
     te = ggml_silu(ctx, te);
+    ggml_format_name(te, "te_post_silu");
     ggml_tensor * w2_2d = ggml_reshape_2d(ctx, weights.time_in_w2.data, H, H);
     ggml_tensor * vec = ggml_mul_mat(ctx, w2_2d, te);
+    ggml_format_name(vec, "vec");
     if (weights.time_in_b2.data) vec = ggml_add(ctx, vec, column_1d(ctx, weights.time_in_b2.data));
+    ggml_format_name(vec, "vec_final");
 
     ggml_tensor * vec_silu = ggml_silu(ctx, vec);
     ggml_tensor * mod_img_raw = b1(vec_silu, weights.double_mod_img);
@@ -312,6 +318,9 @@ DiffuserGraph build_diffuser_graph(
     for (int d = 0; d < params.depth; d++) {
         const auto & db = weights.double_blocks[d];
 
+        debug_check(ctx, h_img, "h_img_pre", nullptr);
+        debug_check(ctx, h_txt, "h_txt_pre", nullptr);
+
         ggml_tensor * img_n = ggml_norm(ctx, h_img, 1e-6f);
         ggml_tensor * txt_n = ggml_norm(ctx, h_txt, 1e-6f);
 
@@ -340,6 +349,9 @@ DiffuserGraph build_diffuser_graph(
         txt_q = rms_norm_qk(ctx, txt_q, db.attn_norm_added_q.data, head_dim);
         txt_k = rms_norm_qk(ctx, txt_k, db.attn_norm_added_k.data, head_dim);
 
+        debug_check(ctx, img_q, "img_q_normed", nullptr);
+        debug_check(ctx, img_k, "img_k_normed", nullptr);
+
         ggml_tensor * img_q_r = nullptr;
         ggml_tensor * img_k_r = nullptr;
         ggml_tensor * txt_q_r = nullptr;
@@ -350,6 +362,9 @@ DiffuserGraph build_diffuser_graph(
         img_k = img_k_r;
         txt_q = txt_q_r;
         txt_k = txt_k_r;
+
+        debug_check(ctx, img_q, "img_q_roped", nullptr);
+        debug_check(ctx, img_k, "img_k_roped", nullptr);
 
         int img_t = img_tokens;
         int txt_t = txt_tokens;
@@ -365,7 +380,9 @@ DiffuserGraph build_diffuser_graph(
         ggml_tensor * scores = ggml_mul_mat(ctx, k_3d, q_3d);
         float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
         ggml_scale_inplace(ctx, scores, scale);
+        debug_check(ctx, scores, "scores_scaled", nullptr);
         scores = ggml_soft_max_inplace(ctx, scores);
+        debug_check(ctx, scores, "scores_softmaxed", nullptr);
 
         ggml_tensor * attn = ggml_mul_mat(ctx, ggml_cont(ctx, ggml_permute(ctx, scores, 1, 0, 2, 3)), ggml_cont(ctx, ggml_permute(ctx, v_3d, 1, 0, 2, 3)));
         attn = ggml_cont(ctx, ggml_permute(ctx, attn, 1, 2, 0, 3));

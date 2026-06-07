@@ -169,4 +169,36 @@ inline ggml_tensor * rope_2d_fwd(ggml_context * ctx, ggml_tensor * x, ggml_tenso
         GGML_N_TASKS_MAX, &ud);
 }
 
+struct DebugCheckUserData {
+    const char * label;
+    int * counter;
+};
+
+inline void debug_check_fwd_f32(ggml_tensor * dst, int ith, int nth, void * userdata) {
+    const auto * ud = (const DebugCheckUserData *)userdata;
+    const ggml_tensor * src_t = dst->src[0];
+    const float * src = (const float *)src_t->data;
+    const int n = (int)ggml_nelements(src_t);
+    int nan_c = 0, inf_c = 0;
+    float mn = 1e30f, mx = -1e30f;
+    for (int i = 0; i < n; i++) {
+        float v = src[i];
+        if (std::isnan(v)) nan_c++;
+        if (std::isinf(v)) inf_c++;
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+    }
+    fprintf(stderr, "[CHK %s] n=%d nan=%d inf=%d min=%.4f max=%.4f\n",
+        ud->label, n, nan_c, inf_c, mn, mx);
+    if (ud->counter) (*ud->counter)++;
+    (void)dst;
+}
+
+inline ggml_tensor * debug_check(ggml_context * ctx, ggml_tensor * x, const char * label, int * counter) {
+    DebugCheckUserData ud{label, counter};
+    ggml_tensor * args[] = { x };
+    return ggml_custom_4d(ctx, GGML_TYPE_F32, 1, 1, 1, 1,
+        args, 1, debug_check_fwd_f32, GGML_N_TASKS_MAX, &ud);
+}
+
 } // namespace bonsai

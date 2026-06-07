@@ -68,10 +68,10 @@ def main():
             tensor_pt = f.get_tensor(key)
             tensor = tensor_pt.to(torch.float32).numpy()
             
-            if len(tensor.shape) == 1:
+            if len(tensor.shape) == 1 or "time" in key:
                 tensor_fp32 = tensor.astype(np.float32)
                 writer.add_tensor(gguf_name, tensor_fp32, raw_dtype=GGMLQuantizationType.F32)
-                print(f"[{i+1}/{total}] {gguf_name} -> F32 (1D)")
+                print(f"[{i+1}/{total}] {gguf_name} -> F32 (1D or Time)")
             else:
                 raw_bytes = quantize_b1_0(tensor)
                 
