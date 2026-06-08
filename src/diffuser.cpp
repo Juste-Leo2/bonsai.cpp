@@ -442,7 +442,9 @@ int main(int argc, char ** argv) {
 
         memcpy(dg.img_in->data, latents.data(), latents.size() * sizeof(float));
         memcpy(dg.txt_in->data, txt_emb.data(), txt_emb.size() * sizeof(float));
-        memcpy(dg.timestep->data, &t, sizeof(float));
+        
+        float t_scaled = t * 1000.0f;
+        memcpy(dg.timestep->data, &t_scaled, sizeof(float));
         memcpy(dg.img_ids->data, img_ids.data(), img_ids.size() * sizeof(float));
         memcpy(dg.txt_ids->data, txt_ids.data(), txt_ids.size() * sizeof(float));
 
@@ -502,6 +504,9 @@ int main(int argc, char ** argv) {
         }
         fprintf(stdout, "  step %3d/%d: out stats: nan=%d inf=%d min=%.4f max=%.4f mean=%.4f\n",
             step + 1, steps, nan_count, inf_count, mn, mx, sum / (C * img_tokens));
+            
+        fprintf(stdout, "  FIRST 5 VALS: [%f, %f, %f, %f, %f]\n", 
+            noise_pred[0], noise_pred[1], noise_pred[2], noise_pred[3], noise_pred[4]);
 
         for (int i = 0; i < C * img_tokens; i++) {
             latents[i] = latents[i] + dt * noise_pred[i];

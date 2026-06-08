@@ -363,7 +363,6 @@ DiffuserGraph build_diffuser_graph(
         txt_v = ggml_cont(ctx, ggml_reshape_3d(ctx, txt_v, head_dim, n_heads, txt_tokens));
 
         img_q = rms_norm_qk(ctx, img_q, db.attn_norm_q.data, head_dim);
-        img_q = debug_check(ctx, img_q, "img_q_rms", nullptr);
         img_k = rms_norm_qk(ctx, img_k, db.attn_norm_k.data, head_dim);
         txt_q = rms_norm_qk(ctx, txt_q, db.attn_norm_added_q.data, head_dim);
         txt_k = rms_norm_qk(ctx, txt_k, db.attn_norm_added_k.data, head_dim);
@@ -387,7 +386,6 @@ DiffuserGraph build_diffuser_graph(
 
         int img_t = img_tokens;
         int txt_t = txt_tokens;
-
         ggml_tensor * q = ggml_concat(ctx, txt_q, img_q, 2);
         ggml_tensor * k = ggml_concat(ctx, txt_k, img_k, 2);
         ggml_tensor * v = ggml_concat(ctx, txt_v, img_v, 2);
@@ -399,7 +397,7 @@ DiffuserGraph build_diffuser_graph(
         ggml_tensor * scores = ggml_mul_mat(ctx, k_3d, q_3d);
         scores = debug_check(ctx, scores, "db_scores_raw", nullptr);
         float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
-        ggml_scale_inplace(ctx, scores, scale);
+        scores = ggml_scale_inplace(ctx, scores, scale);
         scores = debug_check(ctx, scores, "scores_scaled", nullptr);
         scores = ggml_soft_max_inplace(ctx, scores);
         debug_check(ctx, scores, "scores_softmaxed", nullptr);
@@ -412,10 +410,14 @@ DiffuserGraph build_diffuser_graph(
         ggml_tensor * img_attn_out = ggml_view_2d(ctx, attn, H, img_t, attn->nb[1], txt_t * H * sizeof(float));
         ggml_tensor * txt_attn_out = ggml_view_2d(ctx, attn, H, txt_t, attn->nb[1], 0);
 
-        img_attn_out = b1(img_attn_out, db.attn_to_out);
         txt_attn_out = b1(txt_attn_out, db.attn_add_out);
 
-        h_img = ggml_add(ctx, h_img, ggml_mul(ctx, ggml_repeat(ctx, ggml_cont(ctx, ggml_view_1d(ctx, img_mod1.gate, H, 0)), img_attn_out), img_attn_out));
+        img_attn_out = debug_check(ctx, img_attn_out, "img_attn_out_before_proj", nullptr);
+        img_attn_out = b1(img_attn_out, db.attn_to_out);
+        img_attn_out = debug_check(ctx, img_attn_out, "img_attn_out_after_proj", nullptr);
+        
+        ggml_tensor * mod_gate = ggml_view_1d(ctx, img_mod1.gate, H, 0);
+        h_img = ggml_add(ctx, h_img, ggml_mul(ctx, ggml_repeat(ctx, ggml_cont(ctx, mod_gate), img_attn_out), img_attn_out));
         h_txt = ggml_add(ctx, h_txt, ggml_mul(ctx, ggml_repeat(ctx, ggml_cont(ctx, ggml_view_1d(ctx, txt_mod1.gate, H, 0)), txt_attn_out), txt_attn_out));
 
         ggml_tensor * img_ff_n = ggml_norm(ctx, h_img, 1e-6f);
@@ -481,7 +483,7 @@ DiffuserGraph build_diffuser_graph(
         ggml_tensor * s_scores = ggml_mul_mat(ctx, k_3d_a, q_3d_a);
         s_scores = debug_check(ctx, s_scores, "s_scores_raw", nullptr);
         float scale_s = 1.0f / std::sqrt(static_cast<float>(head_dim));
-        ggml_scale_inplace(ctx, s_scores, scale_s);
+        s_scores = ggml_scale_inplace(ctx, s_scores, scale_s);
         s_scores = debug_check(ctx, s_scores, "s_scores_scaled", nullptr);
         s_scores = ggml_soft_max_inplace(ctx, s_scores);
 

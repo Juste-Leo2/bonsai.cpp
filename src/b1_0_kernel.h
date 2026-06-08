@@ -118,7 +118,7 @@ inline void b1_linear_f32_f32(ggml_tensor * dst, int ith, int nth, void * userda
                 fprintf(stderr, "B1_FATAL_OUT: NaN generated in b1_linear! in_dim=%d out_dim=%d r=%d b=%d\n", in_dim, out_dim, r, b);
                 abort();
             }
-            out[r * batch + b] = sum;
+            out[b * out_dim + r] = sum;
         }
     }
 }
