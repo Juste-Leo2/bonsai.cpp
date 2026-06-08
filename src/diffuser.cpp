@@ -400,8 +400,20 @@ int main(int argc, char ** argv) {
 
     int C = params.in_channels;
     std::vector<float> latents(C * img_tokens);
-    for (int i = 0; i < C * img_tokens; i++) {
-        latents[i] = ((float)rand() / RAND_MAX) * 2.0f - 1.0f;
+    
+    FILE * f_latent = fopen("tmp/x_input.bin", "rb");
+    if (f_latent) {
+        fprintf(stdout, "Loading initial latents from tmp/x_input.bin for exact parity...\n");
+        size_t read_count = fread(latents.data(), sizeof(float), latents.size(), f_latent);
+        if (read_count != latents.size()) {
+            fprintf(stderr, "warning: expected %zu elements in x_input.bin, got %zu\n", latents.size(), read_count);
+        }
+        fclose(f_latent);
+    } else {
+        fprintf(stdout, "tmp/x_input.bin not found, using random latents...\n");
+        for (int i = 0; i < C * img_tokens; i++) {
+            latents[i] = ((float)rand() / RAND_MAX) * 2.0f - 1.0f;
+        }
     }
 
     std::vector<float> img_ids(4 * img_tokens, 0.0f);

@@ -101,7 +101,10 @@ inline void b1_linear_f32_f32(ggml_tensor * dst, int ith, int nth, void * userda
 
                 float block_sum = 0.0f;
                 for (int i = 0; i < B1_0_BLOCK_SIZE; i++) {
-                    float a = act[(blk * B1_0_BLOCK_SIZE + i) * batch + b];
+                    int i_dim = blk * B1_0_BLOCK_SIZE + i;
+                    // GGML tensors are column-major: ne[0] is in_dim, ne[1] is batch
+                    // So element at (i_dim, b) is at index b * in_dim + i_dim
+                    float a = act[b * in_dim + i_dim];
                     if ((bits >> i) & 1) {
                         block_sum += a;
                     } else {
