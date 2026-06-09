@@ -6,6 +6,10 @@
 #include <cstring>
 #include <cmath>
 
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif
+
 namespace bonsai {
 
 inline float fp16_to_float(const uint16_t v) {
@@ -85,42 +89,215 @@ inline void b1_linear_f32_f32(ggml_tensor * dst, int ith, int nth, void * userda
     const int row_start = ith * rows_per_thread;
     const int row_end = (row_start + rows_per_thread > out_dim) ? out_dim : row_start + rows_per_thread;
 
-    for (int r = row_start; r < row_end; r++) {
-        for (int b = 0; b < batch; b++) {
-            float sum = 0.0f;
-
-            for (int blk = 0; blk < num_blocks; blk++) {
-                const int byte_off = r * row_stride + blk * B1_0_BLOCK_BYTES;
-
-                uint16_t scale_bits;
-                memcpy(&scale_bits, &w[byte_off], 2);
-                float scale = fp16_to_float(scale_bits);
-
-                uint32_t bits;
-                memcpy(&bits, &w[byte_off + 2], 4);
-
-                float block_sum = 0.0f;
-                for (int i = 0; i < B1_0_BLOCK_SIZE; i++) {
-                    int i_dim = blk * B1_0_BLOCK_SIZE + i;
-                    // GGML tensors are column-major: ne[0] is in_dim, ne[1] is batch
-                    // So element at (i_dim, b) is at index b * in_dim + i_dim
-                    float a = act[b * in_dim + i_dim];
-                    if ((bits >> i) & 1) {
-                        block_sum += a;
-                    } else {
-                        block_sum -= a;
-                    }
-                }
-                sum += scale * block_sum;
-            }
-
-            if (std::isnan(sum) || std::isinf(sum)) {
-                fprintf(stderr, "B1_FATAL_OUT: NaN generated in b1_linear! in_dim=%d out_dim=%d r=%d b=%d\n", in_dim, out_dim, r, b);
-                abort();
-            }
-            out[b * out_dim + r] = sum;
+#ifdef __AVX2__
+    if (ith == 0 && act_t->ne[1] > 0) { // On s'assure de ne l'afficher qu'une fois
+        static bool printed = false;
+        if (!printed) {
+            fprintf(stdout, "\n BONSAI INFO: b1_linear uses the AVX2-optimized path + cache tiling !\n\n");
+            printed = true;
         }
     }
+    const __m256i msb_only = _mm256_set1_epi32(0x80000000);
+    const __m256i shift0 = _mm256_set_epi32(31-7, 31-6, 31-5, 31-4, 31-3, 31-2, 31-1, 31-0);
+    const __m256i shift1 = _mm256_set_epi32(31-15, 31-14, 31-13, 31-12, 31-11, 31-10, 31-9, 31-8);
+    const __m256i shift2 = _mm256_set_epi32(31-23, 31-22, 31-21, 31-20, 31-19, 31-18, 31-17, 31-16);
+    const __m256i shift3 = _mm256_set_epi32(31-31, 31-30, 31-29, 31-28, 31-27, 31-26, 31-25, 31-24);
+
+    const int B_TILE = 32;
+    const int R_TILE = 4;
+
+    for (int b0 = 0; b0 < batch; b0 += B_TILE) {
+        int b_count = (b0 + B_TILE <= batch) ? B_TILE : (batch - b0);
+        
+        for (int r0 = row_start; r0 < row_end; r0 += R_TILE) {
+            int r_count = (r0 + R_TILE <= row_end) ? R_TILE : (row_end - r0);
+            
+            for (int b = b0; b < b0 + b_count; b++) {
+                const float* act_b = act + b * in_dim;
+                
+                if (r_count == 4) {
+                    __m256 sum0 = _mm256_setzero_ps();
+                    __m256 sum1 = _mm256_setzero_ps();
+                    __m256 sum2 = _mm256_setzero_ps();
+                    __m256 sum3 = _mm256_setzero_ps();
+
+                    const uint8_t* w0 = w + (r0 + 0) * row_stride;
+                    const uint8_t* w1 = w + (r0 + 1) * row_stride;
+                    const uint8_t* w2 = w + (r0 + 2) * row_stride;
+                    const uint8_t* w3 = w + (r0 + 3) * row_stride;
+
+                    for (int blk = 0; blk < num_blocks; blk++) {
+                        __m256 a0 = _mm256_loadu_ps(act_b + blk * 32 + 0);
+                        __m256 a1 = _mm256_loadu_ps(act_b + blk * 32 + 8);
+                        __m256 a2 = _mm256_loadu_ps(act_b + blk * 32 + 16);
+                        __m256 a3 = _mm256_loadu_ps(act_b + blk * 32 + 24);
+
+                        // Row 0
+                        {
+                            uint16_t s_bits; memcpy(&s_bits, w0, 2);
+                            __m256 vscale = _mm256_set1_ps(fp16_to_float(s_bits));
+                            uint32_t bits; memcpy(&bits, w0 + 2, 4); w0 += 6;
+                            __m256i v_inv = _mm256_set1_epi32(~bits);
+                            __m256 m0 = _mm256_castsi256_ps(_mm256_and_si256(_mm256_sllv_epi32(v_inv, shift0), msb_only));
+                            __m256 m1 = _mm256_castsi256_ps(_mm256_and_si256(_mm256_sllv_epi32(v_inv, shift1), msb_only));
+                            __m256 m2 = _mm256_castsi256_ps(_mm256_and_si256(_mm256_sllv_epi32(v_inv, shift2), msb_only));
+                            __m256 m3 = _mm256_castsi256_ps(_mm256_and_si256(_mm256_sllv_epi32(v_inv, shift3), msb_only));
+                            __m256 term = _mm256_add_ps(_mm256_add_ps(_mm256_xor_ps(a0, m0), _mm256_xor_ps(a1, m1)),
+                                                        _mm256_add_ps(_mm256_xor_ps(a2, m2), _mm256_xor_ps(a3, m3)));
+                            sum0 = _mm256_add_ps(sum0, _mm256_mul_ps(term, vscale));
+                        }
+                        // Row 1
+                        {
+                            uint16_t s_bits; memcpy(&s_bits, w1, 2);
+                            __m256 vscale = _mm256_set1_ps(fp16_to_float(s_bits));
+                            uint32_t bits; memcpy(&bits, w1 + 2, 4); w1 += 6;
+                            __m256i v_inv = _mm256_set1_epi32(~bits);
+                            __m256 m0 = _mm256_castsi256_ps(_mm256_and_si256(_mm256_sllv_epi32(v_inv, shift0), msb_only));
+                            __m256 m1 = _mm256_castsi256_ps(_mm256_and_si256(_mm256_sllv_epi32(v_inv, shift1), msb_only));
+                            __m256 m2 = _mm256_castsi256_ps(_mm256_and_si256(_mm256_sllv_epi32(v_inv, shift2), msb_only));
+                            __m256 m3 = _mm256_castsi256_ps(_mm256_and_si256(_mm256_sllv_epi32(v_inv, shift3), msb_only));
+                            __m256 term = _mm256_add_ps(_mm256_add_ps(_mm256_xor_ps(a0, m0), _mm256_xor_ps(a1, m1)),
+                                                        _mm256_add_ps(_mm256_xor_ps(a2, m2), _mm256_xor_ps(a3, m3)));
+                            sum1 = _mm256_add_ps(sum1, _mm256_mul_ps(term, vscale));
+                        }
+                        // Row 2
+                        {
+                            uint16_t s_bits; memcpy(&s_bits, w2, 2);
+                            __m256 vscale = _mm256_set1_ps(fp16_to_float(s_bits));
+                            uint32_t bits; memcpy(&bits, w2 + 2, 4); w2 += 6;
+                            __m256i v_inv = _mm256_set1_epi32(~bits);
+                            __m256 m0 = _mm256_castsi256_ps(_mm256_and_si256(_mm256_sllv_epi32(v_inv, shift0), msb_only));
+                            __m256 m1 = _mm256_castsi256_ps(_mm256_and_si256(_mm256_sllv_epi32(v_inv, shift1), msb_only));
+                            __m256 m2 = _mm256_castsi256_ps(_mm256_and_si256(_mm256_sllv_epi32(v_inv, shift2), msb_only));
+                            __m256 m3 = _mm256_castsi256_ps(_mm256_and_si256(_mm256_sllv_epi32(v_inv, shift3), msb_only));
+                            __m256 term = _mm256_add_ps(_mm256_add_ps(_mm256_xor_ps(a0, m0), _mm256_xor_ps(a1, m1)),
+                                                        _mm256_add_ps(_mm256_xor_ps(a2, m2), _mm256_xor_ps(a3, m3)));
+                            sum2 = _mm256_add_ps(sum2, _mm256_mul_ps(term, vscale));
+                        }
+                        // Row 3
+                        {
+                            uint16_t s_bits; memcpy(&s_bits, w3, 2);
+                            __m256 vscale = _mm256_set1_ps(fp16_to_float(s_bits));
+                            uint32_t bits; memcpy(&bits, w3 + 2, 4); w3 += 6;
+                            __m256i v_inv = _mm256_set1_epi32(~bits);
+                            __m256 m0 = _mm256_castsi256_ps(_mm256_and_si256(_mm256_sllv_epi32(v_inv, shift0), msb_only));
+                            __m256 m1 = _mm256_castsi256_ps(_mm256_and_si256(_mm256_sllv_epi32(v_inv, shift1), msb_only));
+                            __m256 m2 = _mm256_castsi256_ps(_mm256_and_si256(_mm256_sllv_epi32(v_inv, shift2), msb_only));
+                            __m256 m3 = _mm256_castsi256_ps(_mm256_and_si256(_mm256_sllv_epi32(v_inv, shift3), msb_only));
+                            __m256 term = _mm256_add_ps(_mm256_add_ps(_mm256_xor_ps(a0, m0), _mm256_xor_ps(a1, m1)),
+                                                        _mm256_add_ps(_mm256_xor_ps(a2, m2), _mm256_xor_ps(a3, m3)));
+                            sum3 = _mm256_add_ps(sum3, _mm256_mul_ps(term, vscale));
+                        }
+                    }
+
+                    auto hsum256_ps = [](__m256 v) -> float {
+                        __m128 vlow = _mm256_castps256_ps128(v);
+                        __m128 vhigh = _mm256_extractf128_ps(v, 1);
+                        vlow = _mm_add_ps(vlow, vhigh);
+                        vlow = _mm_hadd_ps(vlow, vlow);
+                        vlow = _mm_hadd_ps(vlow, vlow);
+                        return _mm_cvtss_f32(vlow);
+                    };
+
+                    float s0 = hsum256_ps(sum0);
+                    float s1 = hsum256_ps(sum1);
+                    float s2 = hsum256_ps(sum2);
+                    float s3 = hsum256_ps(sum3);
+
+                    if (std::isnan(s0) || std::isinf(s0) || std::isnan(s1) || std::isinf(s1) || 
+                        std::isnan(s2) || std::isinf(s2) || std::isnan(s3) || std::isinf(s3)) {
+                        fprintf(stderr, "B1_FATAL_OUT: NaN generated in AVX2 b1_linear! r=%d b=%d\n", r0, b);
+                        abort();
+                    }
+
+                    out[b * out_dim + r0 + 0] = s0;
+                    out[b * out_dim + r0 + 1] = s1;
+                    out[b * out_dim + r0 + 2] = s2;
+                    out[b * out_dim + r0 + 3] = s3;
+                } else {
+                    for (int rr = 0; rr < r_count; rr++) {
+                        int r = r0 + rr;
+                        float sum = 0.0f;
+                        for (int blk = 0; blk < num_blocks; blk++) {
+                            const int byte_off = r * row_stride + blk * B1_0_BLOCK_BYTES;
+
+                            uint16_t scale_bits;
+                            memcpy(&scale_bits, &w[byte_off], 2);
+                            float scale = fp16_to_float(scale_bits);
+
+                            uint32_t bits;
+                            memcpy(&bits, &w[byte_off + 2], 4);
+
+                            float block_sum = 0.0f;
+                            for (int i = 0; i < B1_0_BLOCK_SIZE; i++) {
+                                int i_dim = blk * B1_0_BLOCK_SIZE + i;
+                                float a = act_b[i_dim];
+                                if ((bits >> i) & 1) {
+                                    block_sum += a;
+                                } else {
+                                    block_sum -= a;
+                                }
+                            }
+                            sum += scale * block_sum;
+                        }
+                        if (std::isnan(sum) || std::isinf(sum)) {
+                            fprintf(stderr, "B1_FATAL_OUT: NaN generated in b1_linear! r=%d b=%d\n", r, b);
+                            abort();
+                        }
+                        out[b * out_dim + r] = sum;
+                    }
+                }
+            }
+        }
+    }
+#else
+    if (ith == 0 && act_t->ne[1] > 0) {
+        static bool printed = false;
+        if (!printed) {
+            fprintf(stdout, "\n BONSAI WARNING: b1_linear uses the SLOW path (scalar). Compile with -mavx2 !\n\n");
+            printed = true;
+        }
+    }
+    const int B_TILE = 32;
+    for (int b0 = 0; b0 < batch; b0 += B_TILE) {
+        int b_count = (b0 + B_TILE <= batch) ? B_TILE : (batch - b0);
+        for (int r = row_start; r < row_end; r++) {
+            for (int b = b0; b < b0 + b_count; b++) {
+                float sum = 0.0f;
+                const float* act_b = act + b * in_dim;
+
+                for (int blk = 0; blk < num_blocks; blk++) {
+                    const int byte_off = r * row_stride + blk * B1_0_BLOCK_BYTES;
+
+                    uint16_t scale_bits;
+                    memcpy(&scale_bits, &w[byte_off], 2);
+                    float scale = fp16_to_float(scale_bits);
+
+                    uint32_t bits;
+                    memcpy(&bits, &w[byte_off + 2], 4);
+
+                    float block_sum = 0.0f;
+                    for (int i = 0; i < B1_0_BLOCK_SIZE; i++) {
+                        int i_dim = blk * B1_0_BLOCK_SIZE + i;
+                        float a = act_b[i_dim];
+                        if ((bits >> i) & 1) {
+                            block_sum += a;
+                        } else {
+                            block_sum -= a;
+                        }
+                    }
+                    sum += scale * block_sum;
+                }
+
+                if (std::isnan(sum) || std::isinf(sum)) {
+                    fprintf(stderr, "B1_FATAL_OUT: NaN generated in b1_linear! in_dim=%d out_dim=%d r=%d b=%d\n", in_dim, out_dim, r, b);
+                    abort();
+                }
+                out[b * out_dim + r] = sum;
+            }
+        }
+    }
+#endif
 }
 
 inline ggml_tensor * b1_linear(ggml_context * ctx, ggml_tensor * act, const B1Weights & w, int n_threads, B1LinearUserData & ud) {

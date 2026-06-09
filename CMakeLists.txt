@@ -4,6 +4,23 @@ project(bonsai.cpp VERSION 0.1.0 LANGUAGES CXX C)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Auto-detect and enable AVX2 and FMA flags if the compiler supports them
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag("-mavx2" COMPILER_SUPPORTS_AVX2)
+check_cxx_compiler_flag("-mfma" COMPILER_SUPPORTS_FMA)
+
+if(COMPILER_SUPPORTS_AVX2)
+    message(STATUS "Compiler supports AVX2. Enabling -mavx2.")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx2")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mavx2")
+endif()
+
+if(COMPILER_SUPPORTS_FMA)
+    message(STATUS "Compiler supports FMA. Enabling -mfma.")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mfma")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mfma")
+endif()
+
 # Enable CUDA support
 include(CheckLanguage)
 check_language(CUDA)
