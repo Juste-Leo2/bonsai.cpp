@@ -13,23 +13,7 @@
 namespace bonsai {
 
 inline float fp16_to_float(const uint16_t v) {
-    if (v == 0) return 0.0f;
-    uint32_t sign = (v & 0x8000) << 16;
-    uint32_t exp = (v & 0x7C00) >> 10;
-    uint32_t mant = v & 0x03FF;
-    if (exp == 0) {
-        exp = 0;
-        mant = mant;
-    } else if (exp == 31) {
-        exp = 0x1F;
-        mant = mant;
-    } else {
-        exp += 112;
-    }
-    uint32_t f = sign | (exp << 23) | (mant << 13);
-    float result;
-    memcpy(&result, &f, sizeof(result));
-    return result;
+    return ggml_fp16_to_fp32(v);
 }
 
 inline int popcount64(uint64_t x) {
