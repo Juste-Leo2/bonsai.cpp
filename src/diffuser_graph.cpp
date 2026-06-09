@@ -394,18 +394,33 @@ DiffuserGraph build_diffuser_graph(
         ggml_tensor * k_3d = ggml_cont(ctx, ggml_permute(ctx, k, 0, 2, 1, 3));
         ggml_tensor * v_3d = ggml_cont(ctx, ggml_permute(ctx, v, 0, 2, 1, 3));
 
+        float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+
+        ggml_tensor * attn;
+#if 1 // FLASH ATTENTION
+        ggml_tensor * k_3d_f16 = k_3d;
+        ggml_tensor * v_3d_f16 = v_3d;
+        if (k_3d_f16->type == GGML_TYPE_F32) k_3d_f16 = ggml_cast(ctx, k_3d_f16, GGML_TYPE_F16);
+        if (v_3d_f16->type == GGML_TYPE_F32) v_3d_f16 = ggml_cast(ctx, v_3d_f16, GGML_TYPE_F16);
+        
+        attn = ggml_flash_attn_ext(ctx, q_3d, k_3d_f16, v_3d_f16, nullptr, scale, 0.0f, 0.0f);
+        ggml_flash_attn_ext_set_prec(attn, GGML_PREC_F32);
+        
+        attn = debug_check(ctx, attn, "flash_attn_raw", nullptr);
+        attn = ggml_reshape_2d(ctx, attn, H, txt_t + img_t);
+#else
         ggml_tensor * scores = ggml_mul_mat(ctx, k_3d, q_3d);
         scores = debug_check(ctx, scores, "db_scores_raw", nullptr);
-        float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
         scores = ggml_scale_inplace(ctx, scores, scale);
         scores = debug_check(ctx, scores, "scores_scaled", nullptr);
         scores = ggml_soft_max_inplace(ctx, scores);
         debug_check(ctx, scores, "scores_softmaxed", nullptr);
 
         ggml_tensor * v_3d_t = ggml_cont(ctx, ggml_permute(ctx, v_3d, 1, 0, 2, 3));
-        ggml_tensor * attn = ggml_mul_mat(ctx, v_3d_t, scores);
+        attn = ggml_mul_mat(ctx, v_3d_t, scores);
         attn = ggml_cont(ctx, ggml_permute(ctx, attn, 0, 2, 1, 3));
         attn = ggml_reshape_2d(ctx, attn, H, txt_t + img_t);
+#endif
 
         ggml_tensor * img_attn_out = ggml_view_2d(ctx, attn, H, img_t, attn->nb[1], txt_t * H * sizeof(float));
         ggml_tensor * txt_attn_out = ggml_view_2d(ctx, attn, H, txt_t, attn->nb[1], 0);
@@ -480,17 +495,32 @@ DiffuserGraph build_diffuser_graph(
         ggml_tensor * k_3d_a = ggml_cont(ctx, ggml_permute(ctx, qkv.k, 0, 2, 1, 3));
         ggml_tensor * v_3d_a = ggml_cont(ctx, ggml_permute(ctx, qkv.v, 0, 2, 1, 3));
 
+        float scale_s = 1.0f / std::sqrt(static_cast<float>(head_dim));
+
+        ggml_tensor * s_attn;
+#if 1 // FLASH ATTENTION
+        ggml_tensor * k_3d_a_f16 = k_3d_a;
+        ggml_tensor * v_3d_a_f16 = v_3d_a;
+        if (k_3d_a_f16->type == GGML_TYPE_F32) k_3d_a_f16 = ggml_cast(ctx, k_3d_a_f16, GGML_TYPE_F16);
+        if (v_3d_a_f16->type == GGML_TYPE_F32) v_3d_a_f16 = ggml_cast(ctx, v_3d_a_f16, GGML_TYPE_F16);
+        
+        s_attn = ggml_flash_attn_ext(ctx, q_3d_a, k_3d_a_f16, v_3d_a_f16, nullptr, scale_s, 0.0f, 0.0f);
+        ggml_flash_attn_ext_set_prec(s_attn, GGML_PREC_F32);
+        
+        s_attn = debug_check(ctx, s_attn, "sb_flash_attn_raw", nullptr);
+        s_attn = ggml_reshape_2d(ctx, s_attn, H, seq);
+#else
         ggml_tensor * s_scores = ggml_mul_mat(ctx, k_3d_a, q_3d_a);
         s_scores = debug_check(ctx, s_scores, "s_scores_raw", nullptr);
-        float scale_s = 1.0f / std::sqrt(static_cast<float>(head_dim));
         s_scores = ggml_scale_inplace(ctx, s_scores, scale_s);
         s_scores = debug_check(ctx, s_scores, "s_scores_scaled", nullptr);
         s_scores = ggml_soft_max_inplace(ctx, s_scores);
 
         ggml_tensor * v_3d_a_t = ggml_cont(ctx, ggml_permute(ctx, v_3d_a, 1, 0, 2, 3));
-        ggml_tensor * s_attn = ggml_mul_mat(ctx, v_3d_a_t, s_scores);
+        s_attn = ggml_mul_mat(ctx, v_3d_a_t, s_scores);
         s_attn = ggml_cont(ctx, ggml_permute(ctx, s_attn, 0, 2, 1, 3));
         s_attn = ggml_reshape_2d(ctx, s_attn, H, seq);
+#endif
 
         ggml_tensor * s_mlp_a = mlp_act(ctx, mlp_t, mlp_hd);
         ggml_tensor * s_cat = ggml_concat(ctx, s_attn, s_mlp_a, 0);
