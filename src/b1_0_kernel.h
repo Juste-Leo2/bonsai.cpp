@@ -334,39 +334,42 @@ inline void rope_2d_fwd_f32(ggml_tensor * dst, int ith, int nth, void * userdata
     const float * s   = (const float *)sin_t->data;
     float * out       = (float *)dst->data;
 
-    const int head_stride = n_heads * seq;
-    const int total       = half * n_heads * seq;
-    const int per_thread  = (total + nth - 1) / nth;
-    const int start       = ith * per_thread;
-    const int end         = (start + per_thread > total) ? total : start + per_thread;
+    const int total_blocks = n_heads * seq;
+    const int blocks_per_thread = (total_blocks + nth - 1) / nth;
+    const int start_block = ith * blocks_per_thread;
+    const int end_block = (start_block + blocks_per_thread > total_blocks) ? total_blocks : start_block + blocks_per_thread;
 
-    for (int idx = start; idx < end; idx++) {
-        const int d_pair  = idx / (n_heads * seq);
-        const int rem     = idx - d_pair * (n_heads * seq);
-        const int h       = rem / seq;
-        const int s_idx   = rem - h * seq;
+    int s_idx = start_block / n_heads;
+    int h     = start_block % n_heads;
 
-        const int d_even = d_pair * 2;
-        const int d_odd  = d_even + 1;
+    for (int block = start_block; block < end_block; block++) {
+        // Calculate the base pointer offsets once per sequence-head pair
+        const int base = h * head_dim + s_idx * (head_dim * n_heads);
+        const int angle_base = s_idx * half;
 
-        // GGML storage for [head_dim, n_heads, seq]: x[d + h*D + s*D*H]
-        const int base    = h * head_dim + s_idx * (head_dim * n_heads);
-        const int even_idx = d_even + base;
-        const int odd_idx  = d_odd  + base;
+        // Innermost loop processes half the head_dim sequentially
+        for (int d_pair = 0; d_pair < half; d_pair++) {
+            const int even_idx = d_pair * 2 + base;
+            const int odd_idx  = even_idx + 1;
 
-        // cos/sin tensor is [head_dim/2, seq] in GGML column-major:
-        //   data[d + s * (head_dim/2)]
-        const int angle_idx = d_pair + s_idx * (head_dim / 2);
-        const float cos_v   = c[angle_idx];
-        const float sin_v   = s[angle_idx];
+            const int angle_idx = d_pair + angle_base;
+            const float cos_v   = c[angle_idx];
+            const float sin_v   = s[angle_idx];
 
-        const float a = src[even_idx];
-        const float b = src[odd_idx];
+            const float a = src[even_idx];
+            const float b = src[odd_idx];
 
-        out[even_idx] = a * cos_v - b * sin_v;
-        out[odd_idx]  = a * sin_v + b * cos_v;
+            out[even_idx] = a * cos_v - b * sin_v;
+            out[odd_idx]  = a * sin_v + b * cos_v;
+        }
+
+        // Advance sequential tracking variables (0 integer divisions per element)
+        h++;
+        if (h == n_heads) {
+            h = 0;
+            s_idx++;
+        }
     }
-    (void)head_stride;
 }
 
 inline ggml_tensor * rope_2d_fwd(ggml_context * ctx, ggml_tensor * x, ggml_tensor * cos_t, ggml_tensor * sin_t, Rope2DUserData & ud) {
