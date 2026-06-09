@@ -17,6 +17,10 @@
 
 using namespace bonsai;
 
+namespace bonsai {
+    bool g_bonsai_debug = false;
+}
+
 struct WeightLoadInfo {
     std::string name;
     enum ggml_type type;
@@ -350,8 +354,9 @@ int main(int argc, char ** argv) {
         else if (arg == "-w" && i + 1 < argc) W = std::stoi(argv[++i]);
         else if (arg == "--steps" && i + 1 < argc) steps = std::stoi(argv[++i]);
         else if (arg == "--threads" && i + 1 < argc) n_threads = std::stoi(argv[++i]);
+        else if (arg == "--debug") bonsai::g_bonsai_debug = true;
         else {
-            fprintf(stderr, "usage: %s --embedding <path> [--model path] [-h H] [-w W] [--steps N] [--threads N]\n", argv[0]);
+            fprintf(stderr, "usage: %s --embedding <path> [--model path] [-h H] [-w W] [--steps N] [--threads N] [--debug]\n", argv[0]);
             return 1;
         }
     }

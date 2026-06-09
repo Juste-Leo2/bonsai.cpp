@@ -12,6 +12,8 @@
 
 namespace bonsai {
 
+extern bool g_bonsai_debug;
+
 inline float fp16_to_float(const uint16_t v) {
     return ggml_fp16_to_fp32(v);
 }
@@ -51,7 +53,7 @@ inline void b1_linear_f32_f32(ggml_tensor * dst, int ith, int nth, void * userda
     const uint8_t * w = (const uint8_t *)w_t->data;
     float * out = (float *)dst->data;
 
-    if (ith == 0) {
+    if (ith == 0 && g_bonsai_debug) {
         fprintf(stderr, "B1_DBG: in_dim=%d out_dim=%d num_blocks=%d row_stride=%d nbytes=%lld act_data=%p w_data=%p out_data=%p\n",
             in_dim, out_dim, in_dim/32, (in_dim/32)*6,
             (long long)w_t->ne[0], (void*)act, (void*)w, (void*)out);
@@ -396,6 +398,8 @@ inline void debug_check_fwd_f32(ggml_tensor * dst, int ith, int nth, void * user
 }
 
 inline ggml_tensor * debug_check(ggml_context * ctx, ggml_tensor * x, const char * label, int * counter) {
+    if (!g_bonsai_debug) return x;
+    
     DebugCheckUserData * ud = (DebugCheckUserData *)malloc(sizeof(DebugCheckUserData));
     ud->label = label;
     ud->counter = counter;
