@@ -1,6 +1,7 @@
 #include "ggml.h"
 #include "ggml-cpu.h"
-#include "gguf.h"
+#include "ggml-alloc.h"
+#include "ggml-backend.h"
 
 #include <cmath>
 #include <cstdio>
@@ -174,7 +175,6 @@ static void find_b1_weights(
     w.out_dim = out_dim;
     size_t nbytes = b1_nbytes(in_dim, out_dim);
     w.data = ggml_new_tensor_2d(ctx, GGML_TYPE_I8, nbytes, 1);
-    w.data->data = malloc(nbytes);
 
     for (const auto & info : infos) {
         if (info.name == name) {
@@ -377,7 +377,7 @@ int main(int argc, char ** argv) {
     int img_tokens = H * W;
     int txt_tokens = 512;
 
-    size_t ctx_size = 13ULL * 1024 * 1024 * 1024;
+    size_t ctx_size = 3500ULL * 1024 * 1024; // 3.5 GB for all weights + metadata
     std::vector<uint8_t> buf(ctx_size);
     struct ggml_init_params gparams = {
         /*.mem_size   =*/ ctx_size,
@@ -401,7 +401,23 @@ int main(int argc, char ** argv) {
     fclose(ef);
 
     fprintf(stdout, "Building computation graph...\n");
-    DiffuserGraph dg = build_diffuser_graph(ctx, params, weights, img_tokens, txt_tokens, 1, n_threads);
+    struct ggml_init_params cparams = {
+        /*.mem_size   =*/ 256ULL * 1024 * 1024, // 256 MB for graph structural metadata
+        /*.mem_buffer =*/ NULL,
+        /*.no_alloc   =*/ true,
+    };
+    ggml_context * ctx_compute = ggml_init(cparams);
+    DiffuserGraph dg = build_diffuser_graph(ctx_compute, params, weights, img_tokens, txt_tokens, 1, n_threads);
+
+    fprintf(stdout, "Initializing GGML CPU Backend and Graph Allocator...\n");
+    ggml_backend_t backend = ggml_backend_cpu_init();
+    ggml_backend_cpu_set_n_threads(backend, n_threads);
+
+    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
+    ggml_gallocr_reserve(galloc, dg.graph);
+    ggml_gallocr_alloc_graph(galloc, dg.graph);
+    size_t alloc_size = ggml_gallocr_get_buffer_size(galloc, 0);
+    fprintf(stdout, "Graph allocator reserved %zu MB for intermediate tensors\n", alloc_size / 1024 / 1024);
 
     int C = params.in_channels;
     std::vector<float> latents(C * img_tokens);
@@ -467,7 +483,7 @@ int main(int argc, char ** argv) {
                 nan_in, inf_in, 0, 0, t);
         }
 
-        ggml_graph_compute_with_ctx(ctx, dg.graph, n_threads);
+        ggml_backend_graph_compute(backend, dg.graph);
 
         {
             static const char * names[] = {
@@ -531,6 +547,9 @@ int main(int argc, char ** argv) {
     }
 
     fclose(f);
+    ggml_gallocr_free(galloc);
+    ggml_backend_free(backend);
+    ggml_free(ctx_compute);
     ggml_free(ctx);
 
     return 0;

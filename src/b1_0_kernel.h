@@ -89,7 +89,7 @@ inline void b1_linear_f32_f32(ggml_tensor * dst, int ith, int nth, void * userda
     const __m256i shift2 = _mm256_set_epi32(31-23, 31-22, 31-21, 31-20, 31-19, 31-18, 31-17, 31-16);
     const __m256i shift3 = _mm256_set_epi32(31-31, 31-30, 31-29, 31-28, 31-27, 31-26, 31-25, 31-24);
 
-    const int B_TILE = 32;
+    const int B_TILE = 4;
     const int R_TILE = 4;
 
     for (int b0 = 0; b0 < batch; b0 += B_TILE) {
@@ -244,7 +244,7 @@ inline void b1_linear_f32_f32(ggml_tensor * dst, int ith, int nth, void * userda
             printed = true;
         }
     }
-    const int B_TILE = 32;
+    const int B_TILE = 4;
     for (int b0 = 0; b0 < batch; b0 += B_TILE) {
         int b_count = (b0 + B_TILE <= batch) ? B_TILE : (batch - b0);
         for (int r = row_start; r < row_end; r++) {
