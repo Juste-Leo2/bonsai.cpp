@@ -21,16 +21,7 @@ if(COMPILER_SUPPORTS_FMA)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mfma")
 endif()
 
-# Enable CUDA support
-include(CheckLanguage)
-check_language(CUDA)
-if(CMAKE_CUDA_COMPILER)
-    enable_language(CUDA)
-    set(LLAMA_CUDA ON CACHE BOOL "Enable CUDA support in llama.cpp" FORCE)
-else()
-    message(WARNING "CUDA compiler not found. Falling back to CPU only.")
-    set(LLAMA_CUDA OFF CACHE BOOL "Enable CUDA support in llama.cpp" FORCE)
-endif()
+# CUDA support disabled
 
 # Disable unnecessary llama.cpp features to keep build minimal
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "Build llama.cpp examples" FORCE)
