@@ -2,3 +2,5 @@ models
 build
 tmp
 diffusion_pytorch_model.safetensors
+__pycache__
+.venv
