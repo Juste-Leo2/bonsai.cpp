@@ -1,4 +1,4 @@
-# Test Guide — Encoder
+# Test Guide
 
 ## Python Environment
 
@@ -7,7 +7,11 @@ uv venv --python 3.11 .venv
 uv pip install -r requirements.txt
 ```
 
-## Download the GGUF Model
+---
+
+## 1. Encoder
+
+### Download the GGUF Model
 
 Place the Qwen3-4B GGUF in the `models/` directory:
 
@@ -17,7 +21,7 @@ wget -O models/Qwen3-4B-UD-Q4_K_XL.gguf \
   "https://huggingface.co/unsloth/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-UD-Q4_K_XL.gguf?download=true"
 ```
 
-## Build the Encoder
+### Build
 
 ```sh
 cmake -B build
@@ -26,37 +30,57 @@ cmake --build build -j$(nproc) --target bonsai_encoder
 
 The binary is placed at `build/bonsai_encoder`.
 
-## Run Tests
+### Run
 
 ```sh
-uv run pytest tests/ -v
+uv run pytest tests/test_encoder.py -v
 ```
 
-### What is tested
+All arguments have sensible defaults — override with `--gguf`, `--encoder`, `--prompt`, `--layers`.
 
-| Test | Description |
-|---|---|
-| `test_encoder_matches_hf` | Runs `bonsai_encoder` and HuggingFace reference on the same prompt, then compares `ffn_out` hidden states for layers 9, 18, 27 via cosine similarity (threshold: 0.98). |
-| `test_each_layer_extracted[9/18/27]` | Smoke tests — verifies the encoder produces a non-empty `.bin` for each requested layer. |
-
-### Customising the test (optional)
-
-All arguments have sensible defaults — you only need them for custom paths or values:
-
-```sh
-# all defaults (model in models/, binary in build/)
-uv run pytest tests/ -v
-
-# fully custom
-uv run pytest tests/ -v \
-  --gguf /path/to/model.gguf \
-  --encoder /path/to/bonsai_encoder \
-  --prompt "my test prompt" \
-  --layers "5,10,15"
-```
-
-### How the comparison works
+### How it works
 
 1. **HF reference** loads `Qwen/Qwen3-4B` via `transformers.AutoModel` (bf16) and hooks `model.layers[N].mlp` to capture `ffn_out`.
 2. **C encoder** runs the same prompt through llama.cpp's GGUF model and intercepts tensors named `ffn_out-N` via `cb_eval`.
-3. Both outputs are compared with cosine similarity — values ≥ 0.98 are expected for Q4_K quantized models against the bf16 reference.
+3. Both outputs are compared with cosine similarity — values ≥ 0.98 are expected.
+
+---
+
+## 2. VAE Decoder
+
+### Build
+
+```sh
+cmake -B build
+cmake --build build -j$(nproc) --target bonsai_vae
+```
+
+The binary is placed at `build/bonsai_vae`.
+
+### Run
+
+```sh
+uv run pytest tests/test_vae.py -v
+```
+
+All arguments have sensible defaults — override with `--vae-model` or `--vae-binary`:
+
+```sh
+uv run pytest tests/test_vae.py -v \
+  --vae-model /path/to/flux2-vae.safetensors \
+  --vae-binary /path/to/bonsai_vae
+```
+
+### How it works
+
+1. **Python reference** (`FluxDecoder` in `tests/run_vae.py`) loads the same safetensors, generates a synthetic latent with LCG seed 42, decodes it, and produces a PNG.
+2. **C binary** (`bonsai_vae`) receives the same latent `.bin` via `--latent` and produces its own PNG.
+3. Both PNGs are compared with **MSE + PSNR** — a PSNR > 40 dB is expected (typical result: ~96 dB).
+
+---
+
+## Run all tests
+
+```sh
+uv run pytest tests/ -v
+```

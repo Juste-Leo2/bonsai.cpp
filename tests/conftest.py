@@ -13,6 +13,10 @@ def pytest_addoption(parser):
                      help="Test prompt")
     parser.addoption("--layers", action="store", default="9,18,27",
                      help="Comma-separated layer indices to extract")
+    parser.addoption("--vae-model", action="store", default=None,
+                     help="Path to the flux2-vae.safetensors model")
+    parser.addoption("--vae-binary", action="store", default=None,
+                     help="Path to the bonsai_vae binary")
 
 
 @pytest.fixture
@@ -37,6 +41,30 @@ def encoder_binary(request) -> Path:
         return default
     pytest.skip(f"Encoder binary not found at {default}. "
                 f"Build it first or provide a path with --encoder <path>")
+
+
+@pytest.fixture
+def vae_model(request) -> Path:
+    path = request.config.getoption("--vae-model")
+    if path:
+        return Path(path).resolve()
+    default = PROJECT_ROOT / "models" / "flux2-vae.safetensors"
+    if default.exists():
+        return default
+    pytest.skip(f"VAE model not found at {default}. "
+                f"Provide a path with --vae-model <path>")
+
+
+@pytest.fixture
+def vae_binary(request) -> Path:
+    path = request.config.getoption("--vae-binary")
+    if path:
+        return Path(path).resolve()
+    default = PROJECT_ROOT / "build" / "bonsai_vae"
+    if default.exists():
+        return default
+    pytest.skip(f"VAE binary not found at {default}. "
+                f"Build it first or provide a path with --vae-binary <path>")
 
 
 @pytest.fixture
