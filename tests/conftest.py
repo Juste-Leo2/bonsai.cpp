@@ -17,6 +17,12 @@ def pytest_addoption(parser):
                      help="Path to the flux2-vae.safetensors model")
     parser.addoption("--vae-binary", action="store", default=None,
                      help="Path to the bonsai_vae binary")
+    parser.addoption("--diffuser-model", action="store", default=None,
+                     help="Path to the full-precision safetensors (reference)")
+    parser.addoption("--diffuser-gguf", action="store", default=None,
+                     help="Path to the B1_0 quantized GGUF")
+    parser.addoption("--diffuser-binary", action="store", default=None,
+                     help="Path to the bonsai_diffuser binary")
 
 
 @pytest.fixture
@@ -65,6 +71,43 @@ def vae_binary(request) -> Path:
         return default
     pytest.skip(f"VAE binary not found at {default}. "
                 f"Build it first or provide a path with --vae-binary <path>")
+
+
+@pytest.fixture
+def diffuser_model(request) -> Path:
+    path = request.config.getoption("--diffuser-model")
+    if path:
+        return Path(path).resolve()
+    # The full-precision safetensors at project root
+    default = PROJECT_ROOT / "diffusion_pytorch_model.safetensors"
+    if default.exists():
+        return default
+    pytest.skip(f"Diffuser reference model not found at {default}. "
+                f"Provide a path with --diffuser-model <path>")
+
+
+@pytest.fixture
+def diffuser_gguf(request) -> Path:
+    path = request.config.getoption("--diffuser-gguf")
+    if path:
+        return Path(path).resolve()
+    default = PROJECT_ROOT / "models" / "flux2_4b_1bit.gguf"
+    if default.exists():
+        return default
+    pytest.skip(f"Diffuser GGUF not found at {default}. "
+                f"Provide a path with --diffuser-gguf <path>")
+
+
+@pytest.fixture
+def diffuser_binary(request) -> Path:
+    path = request.config.getoption("--diffuser-binary")
+    if path:
+        return Path(path).resolve()
+    default = PROJECT_ROOT / "build" / "bonsai_diffuser"
+    if default.exists():
+        return default
+    pytest.skip(f"Diffuser binary not found at {default}. "
+                f"Build it first or provide a path with --diffuser-binary <path>")
 
 
 @pytest.fixture
