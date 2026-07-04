@@ -72,13 +72,18 @@ def main():
                 tensor_fp32 = tensor.astype(np.float32)
                 writer.add_tensor(gguf_name, tensor_fp32, raw_dtype=GGMLQuantizationType.F32)
                 print(f"[{i+1}/{total}] {gguf_name} -> F32 (1D or Time)")
-            else:
+            elif key.startswith("transformer_blocks.") or key.startswith("single_transformer_blocks."):
                 raw_bytes = quantize_b1_0(tensor)
                 
                 byte_shape = tensor.shape[:-1] + (tensor.shape[-1] // BLOCK_SIZE * 6,)
                 
                 writer.add_tensor(gguf_name, raw_bytes, raw_shape=byte_shape, raw_dtype=GGML_TYPE_B1_0)
                 print(f"[{i+1}/{total}] {gguf_name} -> B1_0 (2D) | shape {tensor.shape}")
+            else:
+                # Edge projections: keep as F32 (QAT didn't binarize these)
+                tensor_fp32 = tensor.astype(np.float32)
+                writer.add_tensor(gguf_name, tensor_fp32, raw_dtype=GGMLQuantizationType.F32)
+                print(f"[{i+1}/{total}] {gguf_name} -> F32 (edge projection) | shape {tensor.shape}")
                 
     print("\nWriting GGUF file...")
     writer.write_header_to_file()
