@@ -226,10 +226,8 @@ static ggml_tensor * attention(ggml_context * ctx, ggml_tensor * q, ggml_tensor 
     return attn;
 }
 
-static ggml_tensor * mlp_act(ggml_context * ctx, ggml_tensor * mlp, int mlp_hd) {
-    ggml_tensor * g = ggml_view_2d(ctx, mlp, mlp_hd, mlp->ne[1], mlp->nb[1], 0);
-    ggml_tensor * x = ggml_view_2d(ctx, mlp, mlp_hd, mlp->ne[1], mlp->nb[1], mlp_hd * sizeof(float));
-    return ggml_mul(ctx, ggml_silu(ctx, g), x);
+static ggml_tensor * mlp_act(ggml_context * ctx, ggml_tensor * mlp) {
+    return ggml_swiglu(ctx, mlp);
 }
 
 DiffuserGraph build_diffuser_graph(
@@ -448,15 +446,10 @@ DiffuserGraph build_diffuser_graph(
         ggml_tensor * img_mlp_in = b1(img_ff_n, db.ff_linear_in);
         ggml_tensor * txt_mlp_in = b1(txt_ff_n, db.ff_ctx_linear_in);
 
-        int mlp_s = mlp_hd * 2;
-        ggml_tensor * img_mlp_g = ggml_view_2d(ctx, img_mlp_in, mlp_hd, img_t, img_mlp_in->nb[1], 0);
-        ggml_tensor * img_mlp_x = ggml_view_2d(ctx, img_mlp_in, mlp_hd, img_t, img_mlp_in->nb[1], mlp_hd * sizeof(float));
-        ggml_tensor * img_mlp_a = ggml_mul(ctx, ggml_silu(ctx, img_mlp_g), img_mlp_x);
+        ggml_tensor * img_mlp_a = ggml_swiglu(ctx, img_mlp_in);
         img_mlp_a = b1(img_mlp_a, db.ff_linear_out);
 
-        ggml_tensor * txt_mlp_g = ggml_view_2d(ctx, txt_mlp_in, mlp_hd, txt_t, txt_mlp_in->nb[1], 0);
-        ggml_tensor * txt_mlp_x = ggml_view_2d(ctx, txt_mlp_in, mlp_hd, txt_t, txt_mlp_in->nb[1], mlp_hd * sizeof(float));
-        ggml_tensor * txt_mlp_a = ggml_mul(ctx, ggml_silu(ctx, txt_mlp_g), txt_mlp_x);
+        ggml_tensor * txt_mlp_a = ggml_swiglu(ctx, txt_mlp_in);
         txt_mlp_a = b1(txt_mlp_a, db.ff_ctx_linear_out);
 
         h_img = ggml_add(ctx, h_img, ggml_mul(ctx, ggml_repeat(ctx, column_1d(ctx, ggml_cont(ctx, ggml_view_1d(ctx, img_mod2.gate, H, 0))), img_mlp_a), img_mlp_a));
@@ -527,7 +520,7 @@ DiffuserGraph build_diffuser_graph(
         s_attn = ggml_reshape_2d(ctx, s_attn, H, seq);
 #endif
 
-        ggml_tensor * s_mlp_a = mlp_act(ctx, mlp_t, mlp_hd);
+        ggml_tensor * s_mlp_a = mlp_act(ctx, mlp_t);
         ggml_tensor * s_cat = ggml_concat(ctx, s_attn, s_mlp_a, 0);
 
         ggml_tensor * s_out = b1(s_cat, sb.to_out);

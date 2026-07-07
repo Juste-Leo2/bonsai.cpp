@@ -72,4 +72,31 @@ target_include_directories(bonsai_diffuser PRIVATE
 
 install(TARGETS bonsai_diffuser RUNTIME DESTINATION bin)
 
+# --- Tests unitaires des opérations diffuser ---
+# Test b1_linear: multiplication matricielle quantifiée B1_0
+add_executable(test_b1_linear
+    tests/c_ops/test_b1_linear.cpp
+)
+
+target_link_libraries(test_b1_linear PRIVATE ggml ggml-cpu)
+target_include_directories(test_b1_linear PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+)
+
+install(TARGETS test_b1_linear RUNTIME DESTINATION bin)
+
+# Test RoPE 2D: position embedding rotatif 2D
+add_executable(test_rope_2d
+    tests/c_ops/test_rope_2d.cpp
+)
+
+target_link_libraries(test_rope_2d PRIVATE ggml ggml-cpu)
+target_include_directories(test_rope_2d PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+)
+
+install(TARGETS test_rope_2d RUNTIME DESTINATION bin)
+
 
