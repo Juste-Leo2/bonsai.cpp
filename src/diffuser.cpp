@@ -285,17 +285,17 @@ static void load_diffuser_weights(
     int ctx_dim = params.context_in_dim;
     int mlp_hd = params.mlp_hidden_dim;
 
-    find_b1_weights(f, data_offset, infos, ctx, "x_embedder.weight", w.img_in, C, H);
-    find_b1_weights(f, data_offset, infos, ctx, "context_embedder.weight", w.txt_in, ctx_dim, H);
+    find_f32_weight(f, data_offset, infos, ctx, "x_embedder.weight", w.img_in, C * H);
+    find_f32_weight(f, data_offset, infos, ctx, "context_embedder.weight", w.txt_in, ctx_dim * H);
 
     find_f32_weight(f, data_offset, infos, ctx, "time_guidance_embed.timestep_embedder.linear_1.weight", w.time_in_w1, 256 * H);
     find_f32_weight_optional(f, data_offset, infos, ctx, "time_guidance_embed.timestep_embedder.linear_1.bias", w.time_in_b1, H);
     find_f32_weight(f, data_offset, infos, ctx, "time_guidance_embed.timestep_embedder.linear_2.weight", w.time_in_w2, H * H);
     find_f32_weight_optional(f, data_offset, infos, ctx, "time_guidance_embed.timestep_embedder.linear_2.bias", w.time_in_b2, H);
 
-    find_b1_weights(f, data_offset, infos, ctx, "double_stream_img.linear.weight", w.double_mod_img, H, 6 * H);
-    find_b1_weights(f, data_offset, infos, ctx, "double_stream_txt.linear.weight", w.double_mod_txt, H, 6 * H);
-    find_b1_weights(f, data_offset, infos, ctx, "single_stream_modulation.linear.weight", w.single_mod, H, 3 * H);
+    find_f32_weight(f, data_offset, infos, ctx, "double_stream_img.linear.weight", w.double_mod_img, H * 6 * H);
+    find_f32_weight(f, data_offset, infos, ctx, "double_stream_txt.linear.weight", w.double_mod_txt, H * 6 * H);
+    find_f32_weight(f, data_offset, infos, ctx, "single_stream_modulation.linear.weight", w.single_mod, H * 3 * H);
 
     w.double_blocks.resize(params.depth);
     for (int d = 0; d < params.depth; d++) {
@@ -334,8 +334,8 @@ static void load_diffuser_weights(
         find_f32_weight(f, data_offset, infos, ctx, prefix + ".attn.norm_k.weight", sb.norm_k, params.head_dim);
     }
 
-    find_b1_weights(f, data_offset, infos, ctx, "norm_out.linear.weight", w.norm_out_linear, H, 2 * H);
-    find_b1_weights(f, data_offset, infos, ctx, "proj_out.weight", w.proj_out, H, C);
+    find_f32_weight(f, data_offset, infos, ctx, "norm_out.linear.weight", w.norm_out_linear, H * 2 * H);
+    find_f32_weight(f, data_offset, infos, ctx, "proj_out.weight", w.proj_out, H * C);
 }
 
 int main(int argc, char ** argv) {

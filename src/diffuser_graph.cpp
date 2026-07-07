@@ -243,6 +243,8 @@ DiffuserGraph build_diffuser_graph(
 {
     DiffuserGraph result;
     int H = params.hidden_size;
+    int C = params.in_channels;
+    int ctx_dim = params.context_in_dim;
     int n_heads = params.num_heads;
     int head_dim = params.head_dim;
     int mlp_hd = params.mlp_hidden_dim;
@@ -250,11 +252,9 @@ DiffuserGraph build_diffuser_graph(
 
     // Pre-reserve userdata vectors to prevent reallocation invalidating
     // pointers passed to ggml_custom_4d as userdata.
-    // Counts: 4 (h_img, h_txt, mod_img, mod_txt) +
-    //         12 * params.depth (double blocks) +
-    //         1 (mod_single) + 2 * params.depth_single_blocks (single blocks) +
-    //         2 (norm_out, proj_out) = 7 + 12*depth + 2*depth_single_blocks
-    result.b1_ud.reserve(7 + 12 * params.depth + 2 * params.depth_single_blocks + 16);
+    // Counts: 12 * params.depth (double blocks) +
+    //         2 * params.depth_single_blocks (single blocks)
+    result.b1_ud.reserve(12 * params.depth + 2 * params.depth_single_blocks + 16);
     // Each apply_rope_2d call pushes 2 entries (one for q, one for k).
     // Double block: 2 apply_rope_2d calls (img + txt) * 2 = 4 pushes per block.
     // Single block: 1 apply_rope_2d call * 2 = 2 pushes per block.
@@ -281,8 +281,10 @@ DiffuserGraph build_diffuser_graph(
         return b1_linear(ctx, act, w, n_threads, result.b1_ud.back());
     };
 
-    ggml_tensor * h_img = b1(result.img_in, weights.img_in);
-    ggml_tensor * h_txt = b1(result.txt_in, weights.txt_in);
+    ggml_tensor * w_img = ggml_reshape_2d(ctx, weights.img_in.data, C, H);
+    ggml_tensor * h_img = ggml_mul_mat(ctx, w_img, result.img_in);
+    ggml_tensor * w_txt = ggml_reshape_2d(ctx, weights.txt_in.data, ctx_dim, H);
+    ggml_tensor * h_txt = ggml_mul_mat(ctx, w_txt, result.txt_in);
 
     ggml_tensor * te = ggml_timestep_embedding(ctx, result.timestep, 256, 10000);
     ggml_format_name(te, "te_emb");
@@ -300,8 +302,10 @@ DiffuserGraph build_diffuser_graph(
     ggml_format_name(vec, "vec_final");
 
     ggml_tensor * vec_silu = ggml_silu(ctx, vec);
-    ggml_tensor * mod_img_raw = b1(vec_silu, weights.double_mod_img);
-    ggml_tensor * mod_txt_raw = b1(vec_silu, weights.double_mod_txt);
+    ggml_tensor * w_mod_img = ggml_reshape_2d(ctx, weights.double_mod_img.data, H, 6 * H);
+    ggml_tensor * mod_img_raw = ggml_mul_mat(ctx, w_mod_img, vec_silu);
+    ggml_tensor * w_mod_txt = ggml_reshape_2d(ctx, weights.double_mod_txt.data, H, 6 * H);
+    ggml_tensor * mod_txt_raw = ggml_mul_mat(ctx, w_mod_txt, vec_silu);
 
     int B = batch;
     (void)B;
@@ -461,7 +465,8 @@ DiffuserGraph build_diffuser_graph(
 
     ggml_tensor * combined = ggml_concat(ctx, h_txt, h_img, 1);
 
-    ggml_tensor * mod_single_raw = b1(vec_silu, weights.single_mod);
+    ggml_tensor * w_single = ggml_reshape_2d(ctx, weights.single_mod.data, H, 3 * H);
+    ggml_tensor * mod_single_raw = ggml_mul_mat(ctx, w_single, vec_silu);
     ModSplit single_mod;
     split_mod_single(ctx, mod_single_raw, H, 1, single_mod);
 
@@ -534,13 +539,15 @@ DiffuserGraph build_diffuser_graph(
 
     ggml_tensor * fn = ggml_norm(ctx, final_img, 1e-6f);
     ggml_tensor * vec_silu_out = ggml_silu(ctx, vec);
-    ggml_tensor * mod_out_raw = b1(vec_silu_out, weights.norm_out_linear);
+    ggml_tensor * w_norm_out = ggml_reshape_2d(ctx, weights.norm_out_linear.data, H, 2 * H);
+    ggml_tensor * mod_out_raw = ggml_mul_mat(ctx, w_norm_out, vec_silu_out);
     ggml_tensor * mod_out_shift = ggml_view_2d(ctx, mod_out_raw, H, 1, mod_out_raw->nb[1], 0);
     ggml_tensor * mod_out_scale = ggml_view_2d(ctx, mod_out_raw, H, 1, mod_out_raw->nb[1], H * sizeof(float));
 
     fn = ggml_add(ctx, ggml_mul(ctx, fn, ggml_add(ctx, ggml_repeat(ctx, column_1d(ctx, mod_out_scale), fn), ones)), ggml_repeat(ctx, column_1d(ctx, mod_out_shift), fn));
 
-    result.out = b1(fn, weights.proj_out);
+    ggml_tensor * w_proj_out = ggml_reshape_2d(ctx, weights.proj_out.data, H, C);
+    result.out = ggml_mul_mat(ctx, w_proj_out, fn);
     ggml_set_output(result.out);
 
     ggml_build_forward_expand(result.graph, result.out);
