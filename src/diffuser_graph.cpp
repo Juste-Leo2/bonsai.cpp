@@ -531,11 +531,10 @@ DiffuserGraph build_diffuser_graph(
     ggml_tensor * final_img = ggml_view_2d(ctx, combined, H, img_tokens, combined->nb[1], txt_tokens * H * sizeof(float));
 
     ggml_tensor * fn = ggml_norm(ctx, final_img, 1e-6f);
-    ggml_tensor * vec_silu_out = ggml_silu(ctx, vec);
     ggml_tensor * w_norm_out = ggml_reshape_2d(ctx, weights.norm_out_linear.data, H, 2 * H);
-    ggml_tensor * mod_out_raw = ggml_mul_mat(ctx, w_norm_out, vec_silu_out);
-    ggml_tensor * mod_out_shift = ggml_view_2d(ctx, mod_out_raw, H, 1, mod_out_raw->nb[1], 0);
-    ggml_tensor * mod_out_scale = ggml_view_2d(ctx, mod_out_raw, H, 1, mod_out_raw->nb[1], H * sizeof(float));
+    ggml_tensor * mod_out_raw = ggml_mul_mat(ctx, w_norm_out, vec_silu);
+    ggml_tensor * mod_out_scale = ggml_view_2d(ctx, mod_out_raw, H, 1, mod_out_raw->nb[1], 0);
+    ggml_tensor * mod_out_shift = ggml_view_2d(ctx, mod_out_raw, H, 1, mod_out_raw->nb[1], H * sizeof(float));
 
     fn = ggml_add(ctx, ggml_mul(ctx, fn, ggml_add(ctx, ggml_repeat(ctx, column_1d(ctx, mod_out_scale), fn), ones)), ggml_repeat(ctx, column_1d(ctx, mod_out_shift), fn));
 
