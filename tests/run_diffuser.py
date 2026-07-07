@@ -1,5 +1,6 @@
 """HF Flux2Transformer reference for 1-step verification vs bonsai_diffuser B1_0."""
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -7,6 +8,15 @@ import numpy as np
 import torch
 from diffusers import Flux2Transformer2DModel
 from safetensors.torch import load_file
+
+# Noms de modules HF correspondant aux 100 linears B1_0 (quantifiés 1-bit)
+_B1_PATTERNS = re.compile(
+    r"transformer_blocks\.\d+\."
+    r"(?:attn\.(?:to_q|to_k|to_v|to_out\.0|add_q_proj|add_k_proj|add_v_proj|to_add_out)"
+    r"|ff\.(?:linear_in|linear_out)"
+    r"|ff_context\.(?:linear_in|linear_out))"
+    r"|single_transformer_blocks\.\d+\.attn\.(?:to_qkv_mlp_proj|to_out)"
+)
 
 
 @dataclass
@@ -25,7 +35,49 @@ class DiffuserParams:
     txt_tokens: int = 512
 
 
-def load_hf_model(safetensors_path, params: DiffuserParams, device="cpu"):
+def quantize_b1_0_weight(w: torch.Tensor, block_size: int = 32):
+    """Quantifie un poids Linear en B1_0 : chaque bloc de `block_size` poids
+    partage une scale = mean(|w|), les poids deviennent {-scale, +scale}.
+
+    Modifie w en place. w shape: (out_dim, in_dim).
+    """
+    out_dim, in_dim = w.shape
+    n_blocks = in_dim // block_size
+    if n_blocks * block_size != in_dim:
+        raise ValueError(f"in_dim={in_dim} not divisible by block_size={block_size}")
+    w_flat = w.view(out_dim, n_blocks, block_size)
+    scales = w_flat.abs().mean(dim=-1, keepdim=True)   # (out_dim, n_blocks, 1)
+    signs = w_flat.sign()
+    w_flat.data = signs * scales
+
+
+def count_b1_parameters(model) -> tuple[int, int]:
+    """Compte le nombre de paramètres B1_0 vs total."""
+    b1_total = 0
+    all_total = sum(p.numel() for p in model.parameters())
+    for name, mod in model.named_modules():
+        if isinstance(mod, torch.nn.Linear) and _B1_PATTERNS.match(name):
+            b1_total += mod.weight.numel()
+    return b1_total, all_total
+
+
+def apply_b1_0_quantization(model, block_size: int = 32):
+    """Applique la quantification B1_0 à tous les linears ciblés du modèle.
+
+    Retourne le nombre de couches et paramètres quantifiés.
+    """
+    count = 0
+    params = 0
+    for name, mod in model.named_modules():
+        if isinstance(mod, torch.nn.Linear) and _B1_PATTERNS.match(name):
+            quantize_b1_0_weight(mod.weight.data, block_size)
+            count += 1
+            params += mod.weight.numel()
+    print(f"  B1_0 quantized {count} layers ({params:,} params)")
+    return count, params
+
+
+def load_hf_model(safetensors_path, params: DiffuserParams, device="cpu", quantize_b1_0=False, block_size=32):
     model = Flux2Transformer2DModel(
         patch_size=1,
         in_channels=params.in_channels,
@@ -50,6 +102,13 @@ def load_hf_model(safetensors_path, params: DiffuserParams, device="cpu"):
 
     model = model.to(device, dtype=torch.bfloat16)
     model.eval()
+
+    if quantize_b1_0:
+        print("  Applying B1_0 quantization to 100 transformer linears...")
+        apply_b1_0_quantization(model, block_size)
+
+    b1_p, total_p = count_b1_parameters(model)
+    print(f"  B1_0 params: {b1_p/1e9:.2f}B / {total_p/1e9:.2f}B total")
 
     if device == "cuda":
         torch.cuda.synchronize()
