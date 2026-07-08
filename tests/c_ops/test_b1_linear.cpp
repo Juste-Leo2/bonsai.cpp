@@ -276,12 +276,12 @@ int main(int argc, char** argv) {
     struct ggml_cgraph* graph = ggml_new_graph_custom(ctx, 128, false);
     ggml_build_forward_expand(graph, t_out);
 
-    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(ggml_backend_cpu_init()));
+    ggml_backend_t backend = ggml_backend_cpu_init();
+    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
     ggml_gallocr_reserve(galloc, graph);
     ggml_gallocr_alloc_graph(galloc, graph);
 
     // Exécuter
-    ggml_backend_t backend = ggml_backend_cpu_init();
     ggml_backend_graph_compute(backend, graph);
 
     /* 7. Récupération du résultat */

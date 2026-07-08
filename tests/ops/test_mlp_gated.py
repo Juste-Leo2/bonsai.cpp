@@ -48,7 +48,7 @@ def test_mlp_gated_basic():
 
     assert not torch.isnan(out).any()
     assert not torch.isinf(out).any()
-    assert out笨特.shape == (seq, hidden_size)
+    assert out.shape == (seq, hidden_size)
 
 
 def test_mlp_gated_zero_input():
