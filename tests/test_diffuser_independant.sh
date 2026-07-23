@@ -75,22 +75,22 @@ fi
 section "TIER 1 — Pure Python math tests"
 
 run_test "b1_linear: quantification + stabilité" \
-    uv run python -m pytest tests/ops/test_b1_linear.py -v
+    uv run python -m pytest tests/ops/test_b1_linear.py -v -s
 
 run_test "RoPE 2D: freqs table, cos²+sin²=1, rotation 90°" \
-    uv run python -m pytest tests/ops/test_rope_2d.py -v
+    uv run python -m pytest tests/ops/test_rope_2d.py -v -s
 
 run_test "RMS Norm QK: basic, zero-input, tiny values" \
-    uv run python -m pytest tests/ops/test_rms_norm_qk.py -v
+    uv run python -m pytest tests/ops/test_rms_norm_qk.py -v -s
 
 run_test "Flash Attention: equivalence, scale, causal mask" \
-    uv run python -m pytest tests/ops/test_flash_attention.py -v
+    uv run python -m pytest tests/ops/test_flash_attention.py -v -s
 
 run_test "MLP Gated: basic, zero-input, identity" \
-    uv run python -m pytest tests/ops/test_mlp_gated.py -v
+    uv run python -m pytest tests/ops/test_mlp_gated.py -v -s
 
 run_test "Modulation: scale/shift/gate, identity, gate=0, combined" \
-    uv run python -m pytest tests/ops/test_modulation.py -v
+    uv run python -m pytest tests/ops/test_modulation.py -v -s
 
 # ====================================================================
 # TIER 2 — C binary vs Python/HF reference tests
@@ -98,28 +98,28 @@ run_test "Modulation: scale/shift/gate, identity, gate=0, combined" \
 section "TIER 2 — C binary vs Python/HuggingFace reference"
 
 run_test "all_ops: 7 standard + 2 custom ops (b1_linear, rope_2d via C)" \
-    uv run python -m pytest tests/ops/test_all_ops.py -v
+    uv run python -m pytest tests/ops/test_all_ops.py -v -s
 
 run_test "c_ops/b1_linear: C quantized kernel vs PyTorch fp32" \
-    uv run python -m pytest tests/c_ops/test_b1_linear.py -v
+    uv run python -m pytest tests/c_ops/test_b1_linear.py -v -s
 
 run_test "c_ops/rope_2d: C RoPE kernel vs Python reference" \
-    uv run python -m pytest tests/c_ops/test_rope_2d.py -v
+    uv run python -m pytest tests/c_ops/test_rope_2d.py -v -s
 
 run_test "c_ops/input_proj: x_embedder + context_embedder C vs PyTorch" \
-    uv run python -m pytest tests/c_ops/test_input_proj.py -v
+    uv run python -m pytest tests/c_ops/test_input_proj.py -v -s
 
 run_test "c_ops/timestep: embedding + modulation C vs HF (flip_sin_to_cos)" \
-    uv run python -m pytest tests/c_ops/test_timestep.py -v
+    uv run python -m pytest tests/c_ops/test_timestep.py -v -s
 
 run_test "c_ops/double_block: full double block C vs HF Flux2TransformerBlock" \
-    uv run python -m pytest tests/c_ops/test_double_block.py -v
+    uv run python -m pytest tests/c_ops/test_double_block.py -v -s
 
 run_test "c_ops/single_block: full single block C vs HF Flux2SingleTransformerBlock" \
-    uv run python -m pytest tests/c_ops/test_single_block.py -v
+    uv run python -m pytest tests/c_ops/test_single_block.py -v -s
 
 run_test "c_ops/output_head: norm_out + proj_out C vs HF" \
-    uv run python -m pytest tests/c_ops/test_output_head.py -v
+    uv run python -m pytest tests/c_ops/test_output_head.py -v -s
 
 # ====================================================================
 # Summary
