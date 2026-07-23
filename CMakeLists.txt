@@ -99,4 +99,37 @@ target_include_directories(test_rope_2d PRIVATE
 
 install(TARGETS test_rope_2d RUNTIME DESTINATION bin)
 
+# Test input projection (x_embedder / context_embedder)
+add_executable(test_input_proj
+    tests/c_ops/test_input_proj.cpp
+)
+
+target_link_libraries(test_input_proj PRIVATE ggml ggml-cpu)
+target_include_directories(test_input_proj PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+)
+
+# Test timestep embedding + modulation
+add_executable(test_timestep
+    tests/c_ops/test_timestep.cpp
+)
+
+target_link_libraries(test_timestep PRIVATE ggml ggml-cpu)
+target_include_directories(test_timestep PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+)
+
+# Test double block (Flux2TransformerBlock)
+add_executable(test_double_block
+    tests/c_ops/test_double_block.cpp
+)
+
+target_link_libraries(test_double_block PRIVATE ggml ggml-cpu)
+target_include_directories(test_double_block PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
 

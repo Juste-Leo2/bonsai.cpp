@@ -68,12 +68,12 @@ def test_diffuser_matches_hf(
         c_tmp = tmp / "tmp"
         c_tmp.mkdir(exist_ok=True)
         x_input_path = c_tmp / "x_input.bin"
-        lat_c = inputs["latents"][0].t().contiguous().float()
+        lat_c = inputs["latents"][0].contiguous().float()
         lat_c.numpy().tofile(x_input_path)
         print(f"  x_input.bin: {list(lat_c.shape)}", flush=True)
 
         emb_path = tmp / "embeddings.bin"
-        emb_c = inputs["embeddings"][0].t().contiguous().float()
+        emb_c = inputs["embeddings"][0].contiguous().float()
         emb_c.numpy().tofile(emb_path)
         print(f"  embeddings.bin: {list(emb_c.shape)}", flush=True)
 

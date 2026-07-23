@@ -175,11 +175,11 @@ def generate_and_save(model_path, params: DiffuserParams, output_dir, device="cp
     print("Generating synthetic inputs...")
     inputs = generate_synthetic_input(params, seed)
 
-    lat = inputs["latents"][0].t().contiguous().float()
+    lat = inputs["latents"][0].contiguous().float()
     save_bin(lat, out / "x_input.bin")
     print(f"  x_input.bin: {list(lat.shape)}")
 
-    emb = inputs["embeddings"][0].t().contiguous().float()
+    emb = inputs["embeddings"][0].contiguous().float()
     save_bin(emb, out / "embeddings.bin")
     print(f"  embeddings.bin: {list(emb.shape)}")
 
