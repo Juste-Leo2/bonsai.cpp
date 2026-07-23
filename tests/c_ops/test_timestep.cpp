@@ -76,28 +76,27 @@ int main(int argc, char **argv) {
     ggml_tensor *vec = ggml_mul_mat(ctx, w2_2d, te_post_silu);
     ggml_set_name(vec, "vec");
 
-    // HF: Flux2Modulation = LayerNorm(vec) → linear. ggml_norm = LayerNorm.
-    ggml_tensor *vec_col = ggml_reshape_2d(ctx, vec, H, 1);
-    ggml_tensor *vec_norm = ggml_norm(ctx, vec_col, 1e-6f);
-    ggml_set_name(vec_norm, "vec_norm");
+    // HF: Flux2Modulation = SiLU(vec) → linear
+    ggml_tensor * vec_silu = ggml_silu(ctx, vec);
+    ggml_set_name(vec_silu, "vec_silu");
 
     ggml_tensor *w_mod_img_2d = ggml_reshape_2d(ctx, w_mod_img, H, 6*H);
-    ggml_tensor *mod_img = ggml_mul_mat(ctx, w_mod_img_2d, vec_norm);
+    ggml_tensor *mod_img = ggml_mul_mat(ctx, w_mod_img_2d, vec_silu);
     ggml_set_name(mod_img, "mod_img");
 
     ggml_tensor *w_mod_txt_2d = ggml_reshape_2d(ctx, w_mod_txt, H, 6*H);
-    ggml_tensor *mod_txt = ggml_mul_mat(ctx, w_mod_txt_2d, vec_norm);
+    ggml_tensor *mod_txt = ggml_mul_mat(ctx, w_mod_txt_2d, vec_silu);
     ggml_set_name(mod_txt, "mod_txt");
 
     ggml_tensor *mod_single = nullptr;
     if (w_single) {
         ggml_tensor *w_single_2d = ggml_reshape_2d(ctx, w_single, H, 3*H);
-        mod_single = ggml_mul_mat(ctx, w_single_2d, vec_norm);
+        mod_single = ggml_mul_mat(ctx, w_single_2d, vec_silu);
         ggml_set_name(mod_single, "mod_single");
     }
 
     ggml_set_output(te_emb); ggml_set_output(te_pre_silu); ggml_set_output(te_post_silu);
-    ggml_set_output(vec); ggml_set_output(vec_norm);
+    ggml_set_output(vec); ggml_set_output(vec_silu);
     ggml_set_output(mod_img); ggml_set_output(mod_txt);
     if (mod_single) ggml_set_output(mod_single);
 
@@ -107,7 +106,7 @@ int main(int argc, char **argv) {
     ggml_build_forward_expand(graph, te_pre_silu);
     ggml_build_forward_expand(graph, te_post_silu);
     ggml_build_forward_expand(graph, vec);
-    ggml_build_forward_expand(graph, vec_norm);
+    ggml_build_forward_expand(graph, vec_silu);
     ggml_build_forward_expand(graph, mod_img);
     ggml_build_forward_expand(graph, mod_txt);
     if (mod_single) ggml_build_forward_expand(graph, mod_single);
@@ -127,7 +126,7 @@ int main(int argc, char **argv) {
     f32_write("te_pre_silu.bin", te_pre_silu);
     f32_write("te_post_silu.bin", te_post_silu);
     f32_write("vec.bin", vec);
-    f32_write("vec_norm.bin", vec_norm);
+    f32_write("vec_silu.bin", vec_silu);
     f32_write("mod_img.bin", mod_img);
     f32_write("mod_txt.bin", mod_txt);
     if (mod_single) f32_write("mod_single.bin", mod_single);

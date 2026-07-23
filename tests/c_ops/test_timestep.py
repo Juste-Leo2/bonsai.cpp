@@ -41,15 +41,15 @@ def test_timestep_hf():
     te1_silu = F.silu(te1)
     vec = F.linear(te1_silu, w2)  # (1, H)
 
-    # ── HF-style modulation: LayerNorm(vec) → linear ──
-    vec_norm = F.layer_norm(vec, normalized_shape=(H,), eps=1e-6)  # (1, H)
-    mod_img = F.linear(vec_norm, w_mod_img)  # (1, 6H)
-    mod_txt = F.linear(vec_norm, w_mod_txt)  # (1, 6H)
-    mod_single = F.linear(vec_norm, w_single)  # (1, 3H)
+    # ── HF-style modulation: SiLU(vec) → linear (Flux2Modulation.forward) ──
+    vec_silu = F.silu(vec)
+    mod_img = F.linear(vec_silu, w_mod_img)  # (1, 6H)
+    mod_txt = F.linear(vec_silu, w_mod_txt)  # (1, 6H)
+    mod_single = F.linear(vec_silu, w_single)  # (1, 3H)
 
     # Stats
     for name, val in [("te_flip",te_flip),("te_pre_silu",te_pre_silu),("te_silu",te1_silu),
-                       ("vec",vec),("vec_norm",vec_norm),("mod_img",mod_img),("mod_txt",mod_txt)]:
+                       ("vec",vec),("vec_silu",vec_silu),("mod_img",mod_img),("mod_txt",mod_txt)]:
         print(f"  {name}: μ={val.mean():.6f} σ={val.std():.6f} min={val.min():.6f} max={val.max():.6f}")
 
     # ── Save for C ──
@@ -80,7 +80,7 @@ def test_timestep_hf():
         "te_pre_silu": (te_pre_silu, (1,H)),
         "te_post_silu": (te1_silu, (1,H)),
         "vec": (vec, (1,H)),
-        "vec_norm": (vec_norm, (1,H)),
+        "vec_silu": (vec_silu, (1,H)),
         "mod_img": (mod_img, (1,6*H)),
         "mod_txt": (mod_txt, (1,6*H)),
         "mod_single": (mod_single, (1,3*H)),

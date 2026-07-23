@@ -345,6 +345,8 @@ int main(int argc, char ** argv) {
     int W = 64;
     int steps = 20;
     int n_threads = 4;
+    int max_depth = 0;
+    int max_single = 0;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -355,6 +357,9 @@ int main(int argc, char ** argv) {
         else if (arg == "--steps" && i + 1 < argc) steps = std::stoi(argv[++i]);
         else if (arg == "--threads" && i + 1 < argc) n_threads = std::stoi(argv[++i]);
         else if (arg == "--debug") bonsai::g_bonsai_debug = true;
+        else if (arg == "--dump-blocks") bonsai::g_bonsai_debug = true; // dump flag, also enable debug
+        else if (arg == "--max-depth" && i + 1 < argc) max_depth = std::stoi(argv[++i]);
+        else if (arg == "--max-single" && i + 1 < argc) max_single = std::stoi(argv[++i]);
         else {
             fprintf(stderr, "usage: %s --embedding <path> [--model path] [-h H] [-w W] [--steps N] [--threads N] [--debug]\n", argv[0]);
             return 1;
@@ -407,7 +412,7 @@ int main(int argc, char ** argv) {
         /*.no_alloc   =*/ true,
     };
     ggml_context * ctx_compute = ggml_init(cparams);
-    DiffuserGraph dg = build_diffuser_graph(ctx_compute, params, weights, img_tokens, txt_tokens, 1, n_threads);
+    DiffuserGraph dg = build_diffuser_graph(ctx_compute, params, weights, img_tokens, txt_tokens, 1, n_threads, max_depth, max_single);
 
     fprintf(stdout, "Initializing GGML CPU Backend and Graph Allocator...\n");
     ggml_backend_t backend = ggml_backend_cpu_init();
@@ -484,6 +489,25 @@ int main(int argc, char ** argv) {
         }
 
         ggml_backend_graph_compute(backend, dg.graph);
+
+        // Dump block-level intermediate tensors for debugging
+        {
+            static const char * block_names[] = {"db0_h_img", "db0_h_txt", "sb0_combined"};
+            for (int n = 0; n < (int)(sizeof(block_names)/sizeof(block_names[0])); n++) {
+                ggml_tensor * t = ggml_graph_get_tensor(dg.graph, block_names[n]);
+                if (t && t->data) {
+                    char fname[256];
+                    snprintf(fname, sizeof(fname), "dump_%s.bin", block_names[n]);
+                    FILE * df = fopen(fname, "wb");
+                    if (df) {
+                        fwrite(t->data, 1, ggml_nbytes(t), df);
+                        fclose(df);
+                        fprintf(stdout, "  dumped %s: [%lld,%lld] %zu bytes\n",
+                            block_names[n], (long long)t->ne[0], (long long)t->ne[1], ggml_nbytes(t));
+                    }
+                }
+            }
+        }
 
         {
             static const char * names[] = {

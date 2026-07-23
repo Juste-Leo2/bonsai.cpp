@@ -237,7 +237,9 @@ DiffuserGraph build_diffuser_graph(
     int img_tokens,
     int txt_tokens,
     int batch,
-    int n_threads)
+    int n_threads,
+    int max_depth,
+    int max_single_depth)
 {
     DiffuserGraph result;
     int H = params.hidden_size;
@@ -303,12 +305,11 @@ DiffuserGraph build_diffuser_graph(
     if (weights.time_in_b2.data) vec = ggml_add(ctx, vec, column_1d(ctx, weights.time_in_b2.data));
     ggml_format_name(vec, "vec_final");
 
-    ggml_tensor * vec_col = ggml_reshape_2d(ctx, vec, H, 1);
-    ggml_tensor * vec_norm = ggml_norm(ctx, vec_col, 1e-6f);
+    ggml_tensor * vec_silu = ggml_silu(ctx, vec);
     ggml_tensor * w_mod_img = ggml_reshape_2d(ctx, weights.double_mod_img.data, H, 6 * H);
-    ggml_tensor * mod_img_raw = ggml_mul_mat(ctx, w_mod_img, vec_norm);
+    ggml_tensor * mod_img_raw = ggml_mul_mat(ctx, w_mod_img, vec_silu);
     ggml_tensor * w_mod_txt = ggml_reshape_2d(ctx, weights.double_mod_txt.data, H, 6 * H);
-    ggml_tensor * mod_txt_raw = ggml_mul_mat(ctx, w_mod_txt, vec_norm);
+    ggml_tensor * mod_txt_raw = ggml_mul_mat(ctx, w_mod_txt, vec_silu);
 
     int B = batch;
     (void)B;
@@ -339,7 +340,8 @@ DiffuserGraph build_diffuser_graph(
 
     (void)ones;
 
-    for (int d = 0; d < params.depth; d++) {
+    int actual_depth = (max_depth > 0 && max_depth < params.depth) ? max_depth : params.depth;
+    for (int d = 0; d < actual_depth; d++) {
         const auto & db = weights.double_blocks[d];
 
         debug_check(ctx, h_img, "h_img_pre", nullptr);
@@ -459,16 +461,22 @@ DiffuserGraph build_diffuser_graph(
 
         h_img = ggml_add(ctx, h_img, ggml_mul(ctx, ggml_repeat(ctx, column_1d(ctx, ggml_cont(ctx, ggml_view_1d(ctx, img_mod2.gate, H, 0))), img_mlp_a), img_mlp_a));
         h_txt = ggml_add(ctx, h_txt, ggml_mul(ctx, ggml_repeat(ctx, column_1d(ctx, ggml_cont(ctx, ggml_view_1d(ctx, txt_mod2.gate, H, 0))), txt_mlp_a), txt_mlp_a));
+
+        if (d == 0) {
+            ggml_set_name(h_img, "db0_h_img");
+            ggml_set_name(h_txt, "db0_h_txt");
+        }
     }
 
     ggml_tensor * combined = ggml_concat(ctx, h_txt, h_img, 1);
 
     ggml_tensor * w_single = ggml_reshape_2d(ctx, weights.single_mod.data, H, 3 * H);
-    ggml_tensor * mod_single_raw = ggml_mul_mat(ctx, w_single, vec_norm);
+    ggml_tensor * mod_single_raw = ggml_mul_mat(ctx, w_single, vec_silu);
     ModSplit single_mod;
     split_mod_single(ctx, mod_single_raw, H, 1, single_mod);
 
-    for (int s = 0; s < params.depth_single_blocks; s++) {
+    int actual_single = (max_single_depth > 0 && max_single_depth < params.depth_single_blocks) ? max_single_depth : params.depth_single_blocks;
+    for (int s = 0; s < actual_single; s++) {
         const auto & sb = weights.single_blocks[s];
 
         ggml_tensor * x_n = ggml_norm(ctx, combined, 1e-6f);
@@ -531,13 +539,16 @@ DiffuserGraph build_diffuser_graph(
         ggml_tensor * s_out = b1(s_cat, sb.to_out);
 
         combined = ggml_add(ctx, combined, ggml_mul(ctx, ggml_repeat(ctx, column_1d(ctx, ggml_cont(ctx, ggml_view_1d(ctx, single_mod.gate, H, 0))), s_out), s_out));
+        if (s == 0) {
+            ggml_set_name(combined, "sb0_combined");
+        }
     }
 
     ggml_tensor * final_img = ggml_view_2d(ctx, combined, H, img_tokens, combined->nb[1], txt_tokens * H * sizeof(float));
 
     ggml_tensor * fn = ggml_norm(ctx, final_img, 1e-6f);
     ggml_tensor * w_norm_out = ggml_reshape_2d(ctx, weights.norm_out_linear.data, H, 2 * H);
-    ggml_tensor * mod_out_raw = ggml_mul_mat(ctx, w_norm_out, vec_norm);
+    ggml_tensor * mod_out_raw = ggml_mul_mat(ctx, w_norm_out, vec_silu);
     ggml_tensor * mod_out_scale = ggml_view_2d(ctx, mod_out_raw, H, 1, mod_out_raw->nb[1], 0);
     ggml_tensor * mod_out_shift = ggml_view_2d(ctx, mod_out_raw, H, 1, mod_out_raw->nb[1], H * sizeof(float));
 

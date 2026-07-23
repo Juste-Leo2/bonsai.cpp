@@ -28,6 +28,8 @@ DiffuserGraph build_diffuser_graph(
     int img_tokens,
     int txt_tokens,
     int batch,
-    int n_threads);
+    int n_threads,
+    int max_depth = 0,           // 0 = all, N = limit to N double blocks
+    int max_single_depth = 0);   // 0 = all, N = limit to N single blocks
 
 } // namespace bonsai
