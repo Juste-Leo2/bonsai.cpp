@@ -72,4 +72,87 @@ target_include_directories(bonsai_diffuser PRIVATE
 
 install(TARGETS bonsai_diffuser RUNTIME DESTINATION bin)
 
+# --- Tests unitaires des opérations diffuser ---
+# Test b1_linear: multiplication matricielle quantifiée B1_0
+add_executable(test_b1_linear
+    tests/c_ops/test_b1_linear.cpp
+)
+
+target_link_libraries(test_b1_linear PRIVATE ggml ggml-cpu)
+target_include_directories(test_b1_linear PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+)
+
+install(TARGETS test_b1_linear RUNTIME DESTINATION bin)
+
+# Test RoPE 2D: position embedding rotatif 2D
+add_executable(test_rope_2d
+    tests/c_ops/test_rope_2d.cpp
+)
+
+target_link_libraries(test_rope_2d PRIVATE ggml ggml-cpu)
+target_include_directories(test_rope_2d PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+)
+
+install(TARGETS test_rope_2d RUNTIME DESTINATION bin)
+
+# Test input projection (x_embedder / context_embedder)
+add_executable(test_input_proj
+    tests/c_ops/test_input_proj.cpp
+)
+
+target_link_libraries(test_input_proj PRIVATE ggml ggml-cpu)
+target_include_directories(test_input_proj PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+)
+
+# Test timestep embedding + modulation
+add_executable(test_timestep
+    tests/c_ops/test_timestep.cpp
+)
+
+target_link_libraries(test_timestep PRIVATE ggml ggml-cpu)
+target_include_directories(test_timestep PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+)
+
+# Test double block (Flux2TransformerBlock)
+add_executable(test_double_block
+    tests/c_ops/test_double_block.cpp
+)
+
+target_link_libraries(test_double_block PRIVATE ggml ggml-cpu)
+target_include_directories(test_double_block PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+# Test single block (Flux2SingleTransformerBlock)
+add_executable(test_single_block
+    tests/c_ops/test_single_block.cpp
+)
+
+target_link_libraries(test_single_block PRIVATE ggml ggml-cpu)
+target_include_directories(test_single_block PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+# Test output head
+add_executable(test_output_head
+    tests/c_ops/test_output_head.cpp
+)
+
+target_link_libraries(test_output_head PRIVATE ggml ggml-cpu)
+target_include_directories(test_output_head PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+)
 

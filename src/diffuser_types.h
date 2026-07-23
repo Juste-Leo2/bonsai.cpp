@@ -40,15 +40,15 @@ struct FPWeights {
 };
 
 struct DiffuserWeights {
-    B1Weights img_in;
+    FPWeights img_in;
     FPWeights time_in_w1;
     FPWeights time_in_b1;
     FPWeights time_in_w2;
     FPWeights time_in_b2;
-    B1Weights txt_in;
-    B1Weights double_mod_img;
-    B1Weights double_mod_txt;
-    B1Weights single_mod;
+    FPWeights txt_in;
+    FPWeights double_mod_img;
+    FPWeights double_mod_txt;
+    FPWeights single_mod;
 
     struct DoubleBlock {
         B1Weights attn_to_q;
@@ -78,8 +78,8 @@ struct DiffuserWeights {
     };
     std::vector<SingleBlock> single_blocks;
 
-    B1Weights norm_out_linear;
-    B1Weights proj_out;
+    FPWeights norm_out_linear;
+    FPWeights proj_out;
 };
 
 } // namespace bonsai

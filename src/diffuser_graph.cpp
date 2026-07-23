@@ -226,10 +226,8 @@ static ggml_tensor * attention(ggml_context * ctx, ggml_tensor * q, ggml_tensor 
     return attn;
 }
 
-static ggml_tensor * mlp_act(ggml_context * ctx, ggml_tensor * mlp, int mlp_hd) {
-    ggml_tensor * g = ggml_view_2d(ctx, mlp, mlp_hd, mlp->ne[1], mlp->nb[1], 0);
-    ggml_tensor * x = ggml_view_2d(ctx, mlp, mlp_hd, mlp->ne[1], mlp->nb[1], mlp_hd * sizeof(float));
-    return ggml_mul(ctx, ggml_silu(ctx, g), x);
+static ggml_tensor * mlp_act(ggml_context * ctx, ggml_tensor * mlp) {
+    return ggml_swiglu(ctx, mlp);
 }
 
 DiffuserGraph build_diffuser_graph(
@@ -239,10 +237,14 @@ DiffuserGraph build_diffuser_graph(
     int img_tokens,
     int txt_tokens,
     int batch,
-    int n_threads)
+    int n_threads,
+    int max_depth,
+    int max_single_depth)
 {
     DiffuserGraph result;
     int H = params.hidden_size;
+    int C = params.in_channels;
+    int ctx_dim = params.context_in_dim;
     int n_heads = params.num_heads;
     int head_dim = params.head_dim;
     int mlp_hd = params.mlp_hidden_dim;
@@ -250,11 +252,9 @@ DiffuserGraph build_diffuser_graph(
 
     // Pre-reserve userdata vectors to prevent reallocation invalidating
     // pointers passed to ggml_custom_4d as userdata.
-    // Counts: 4 (h_img, h_txt, mod_img, mod_txt) +
-    //         12 * params.depth (double blocks) +
-    //         1 (mod_single) + 2 * params.depth_single_blocks (single blocks) +
-    //         2 (norm_out, proj_out) = 7 + 12*depth + 2*depth_single_blocks
-    result.b1_ud.reserve(7 + 12 * params.depth + 2 * params.depth_single_blocks + 16);
+    // Counts: 12 * params.depth (double blocks) +
+    //         2 * params.depth_single_blocks (single blocks)
+    result.b1_ud.reserve(12 * params.depth + 2 * params.depth_single_blocks + 16);
     // Each apply_rope_2d call pushes 2 entries (one for q, one for k).
     // Double block: 2 apply_rope_2d calls (img + txt) * 2 = 4 pushes per block.
     // Single block: 1 apply_rope_2d call * 2 = 2 pushes per block.
@@ -281,10 +281,16 @@ DiffuserGraph build_diffuser_graph(
         return b1_linear(ctx, act, w, n_threads, result.b1_ud.back());
     };
 
-    ggml_tensor * h_img = b1(result.img_in, weights.img_in);
-    ggml_tensor * h_txt = b1(result.txt_in, weights.txt_in);
+    ggml_tensor * w_img = ggml_reshape_2d(ctx, weights.img_in.data, C, H);
+    ggml_tensor * h_img = ggml_mul_mat(ctx, w_img, result.img_in);
+    ggml_tensor * w_txt = ggml_reshape_2d(ctx, weights.txt_in.data, ctx_dim, H);
+    ggml_tensor * h_txt = ggml_mul_mat(ctx, w_txt, result.txt_in);
 
-    ggml_tensor * te = ggml_timestep_embedding(ctx, result.timestep, 256, 10000);
+    ggml_tensor * te_raw = ggml_timestep_embedding(ctx, result.timestep, 256, 10000);
+    // HF Timesteps(flip_sin_to_cos=True) → [sin, cos]; ggml → [cos, sin]. Swap halves.
+    ggml_tensor * te_cos = ggml_view_2d(ctx, te_raw, 128, 1, te_raw->nb[1], 0);
+    ggml_tensor * te_sin = ggml_view_2d(ctx, te_raw, 128, 1, te_raw->nb[1], 128 * sizeof(float));
+    ggml_tensor * te = ggml_concat(ctx, te_sin, te_cos, 0);
     ggml_format_name(te, "te_emb");
     ggml_tensor * w1_2d = ggml_reshape_2d(ctx, weights.time_in_w1.data, 256, H);
     te = ggml_mul_mat(ctx, w1_2d, te);
@@ -300,8 +306,10 @@ DiffuserGraph build_diffuser_graph(
     ggml_format_name(vec, "vec_final");
 
     ggml_tensor * vec_silu = ggml_silu(ctx, vec);
-    ggml_tensor * mod_img_raw = b1(vec_silu, weights.double_mod_img);
-    ggml_tensor * mod_txt_raw = b1(vec_silu, weights.double_mod_txt);
+    ggml_tensor * w_mod_img = ggml_reshape_2d(ctx, weights.double_mod_img.data, H, 6 * H);
+    ggml_tensor * mod_img_raw = ggml_mul_mat(ctx, w_mod_img, vec_silu);
+    ggml_tensor * w_mod_txt = ggml_reshape_2d(ctx, weights.double_mod_txt.data, H, 6 * H);
+    ggml_tensor * mod_txt_raw = ggml_mul_mat(ctx, w_mod_txt, vec_silu);
 
     int B = batch;
     (void)B;
@@ -332,7 +340,8 @@ DiffuserGraph build_diffuser_graph(
 
     (void)ones;
 
-    for (int d = 0; d < params.depth; d++) {
+    int actual_depth = (max_depth > 0 && max_depth < params.depth) ? max_depth : params.depth;
+    for (int d = 0; d < actual_depth; d++) {
         const auto & db = weights.double_blocks[d];
 
         debug_check(ctx, h_img, "h_img_pre", nullptr);
@@ -444,28 +453,30 @@ DiffuserGraph build_diffuser_graph(
         ggml_tensor * img_mlp_in = b1(img_ff_n, db.ff_linear_in);
         ggml_tensor * txt_mlp_in = b1(txt_ff_n, db.ff_ctx_linear_in);
 
-        int mlp_s = mlp_hd * 2;
-        ggml_tensor * img_mlp_g = ggml_view_2d(ctx, img_mlp_in, mlp_hd, img_t, img_mlp_in->nb[1], 0);
-        ggml_tensor * img_mlp_x = ggml_view_2d(ctx, img_mlp_in, mlp_hd, img_t, img_mlp_in->nb[1], mlp_hd * sizeof(float));
-        ggml_tensor * img_mlp_a = ggml_mul(ctx, ggml_silu(ctx, img_mlp_g), img_mlp_x);
+        ggml_tensor * img_mlp_a = ggml_swiglu(ctx, img_mlp_in);
         img_mlp_a = b1(img_mlp_a, db.ff_linear_out);
 
-        ggml_tensor * txt_mlp_g = ggml_view_2d(ctx, txt_mlp_in, mlp_hd, txt_t, txt_mlp_in->nb[1], 0);
-        ggml_tensor * txt_mlp_x = ggml_view_2d(ctx, txt_mlp_in, mlp_hd, txt_t, txt_mlp_in->nb[1], mlp_hd * sizeof(float));
-        ggml_tensor * txt_mlp_a = ggml_mul(ctx, ggml_silu(ctx, txt_mlp_g), txt_mlp_x);
+        ggml_tensor * txt_mlp_a = ggml_swiglu(ctx, txt_mlp_in);
         txt_mlp_a = b1(txt_mlp_a, db.ff_ctx_linear_out);
 
         h_img = ggml_add(ctx, h_img, ggml_mul(ctx, ggml_repeat(ctx, column_1d(ctx, ggml_cont(ctx, ggml_view_1d(ctx, img_mod2.gate, H, 0))), img_mlp_a), img_mlp_a));
         h_txt = ggml_add(ctx, h_txt, ggml_mul(ctx, ggml_repeat(ctx, column_1d(ctx, ggml_cont(ctx, ggml_view_1d(ctx, txt_mod2.gate, H, 0))), txt_mlp_a), txt_mlp_a));
+
+        if (d == 0) {
+            ggml_set_name(h_img, "db0_h_img");
+            ggml_set_name(h_txt, "db0_h_txt");
+        }
     }
 
     ggml_tensor * combined = ggml_concat(ctx, h_txt, h_img, 1);
 
-    ggml_tensor * mod_single_raw = b1(vec_silu, weights.single_mod);
+    ggml_tensor * w_single = ggml_reshape_2d(ctx, weights.single_mod.data, H, 3 * H);
+    ggml_tensor * mod_single_raw = ggml_mul_mat(ctx, w_single, vec_silu);
     ModSplit single_mod;
     split_mod_single(ctx, mod_single_raw, H, 1, single_mod);
 
-    for (int s = 0; s < params.depth_single_blocks; s++) {
+    int actual_single = (max_single_depth > 0 && max_single_depth < params.depth_single_blocks) ? max_single_depth : params.depth_single_blocks;
+    for (int s = 0; s < actual_single; s++) {
         const auto & sb = weights.single_blocks[s];
 
         ggml_tensor * x_n = ggml_norm(ctx, combined, 1e-6f);
@@ -522,25 +533,29 @@ DiffuserGraph build_diffuser_graph(
         s_attn = ggml_reshape_2d(ctx, s_attn, H, seq);
 #endif
 
-        ggml_tensor * s_mlp_a = mlp_act(ctx, mlp_t, mlp_hd);
+        ggml_tensor * s_mlp_a = mlp_act(ctx, mlp_t);
         ggml_tensor * s_cat = ggml_concat(ctx, s_attn, s_mlp_a, 0);
 
         ggml_tensor * s_out = b1(s_cat, sb.to_out);
 
         combined = ggml_add(ctx, combined, ggml_mul(ctx, ggml_repeat(ctx, column_1d(ctx, ggml_cont(ctx, ggml_view_1d(ctx, single_mod.gate, H, 0))), s_out), s_out));
+        if (s == 0) {
+            ggml_set_name(combined, "sb0_combined");
+        }
     }
 
     ggml_tensor * final_img = ggml_view_2d(ctx, combined, H, img_tokens, combined->nb[1], txt_tokens * H * sizeof(float));
 
     ggml_tensor * fn = ggml_norm(ctx, final_img, 1e-6f);
-    ggml_tensor * vec_silu_out = ggml_silu(ctx, vec);
-    ggml_tensor * mod_out_raw = b1(vec_silu_out, weights.norm_out_linear);
-    ggml_tensor * mod_out_shift = ggml_view_2d(ctx, mod_out_raw, H, 1, mod_out_raw->nb[1], 0);
-    ggml_tensor * mod_out_scale = ggml_view_2d(ctx, mod_out_raw, H, 1, mod_out_raw->nb[1], H * sizeof(float));
+    ggml_tensor * w_norm_out = ggml_reshape_2d(ctx, weights.norm_out_linear.data, H, 2 * H);
+    ggml_tensor * mod_out_raw = ggml_mul_mat(ctx, w_norm_out, vec_silu);
+    ggml_tensor * mod_out_scale = ggml_view_2d(ctx, mod_out_raw, H, 1, mod_out_raw->nb[1], 0);
+    ggml_tensor * mod_out_shift = ggml_view_2d(ctx, mod_out_raw, H, 1, mod_out_raw->nb[1], H * sizeof(float));
 
     fn = ggml_add(ctx, ggml_mul(ctx, fn, ggml_add(ctx, ggml_repeat(ctx, column_1d(ctx, mod_out_scale), fn), ones)), ggml_repeat(ctx, column_1d(ctx, mod_out_shift), fn));
 
-    result.out = b1(fn, weights.proj_out);
+    ggml_tensor * w_proj_out = ggml_reshape_2d(ctx, weights.proj_out.data, H, C);
+    result.out = ggml_mul_mat(ctx, w_proj_out, fn);
     ggml_set_output(result.out);
 
     ggml_build_forward_expand(result.graph, result.out);
