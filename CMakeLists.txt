@@ -154,5 +154,20 @@ target_link_libraries(test_output_head PRIVATE ggml ggml-cpu)
 target_include_directories(test_output_head PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
     ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+install(TARGETS test_output_head RUNTIME DESTINATION bin)
+
+# Test WebGPU custom ops (b1_linear + rope_2d GPU vs CPU)
+add_executable(test_webgpu_ops
+    tests/c_ops/test_webgpu_ops.cpp
+)
+
+target_link_libraries(test_webgpu_ops PRIVATE ggml ggml-cpu ggml-webgpu)
+target_include_directories(test_webgpu_ops PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
