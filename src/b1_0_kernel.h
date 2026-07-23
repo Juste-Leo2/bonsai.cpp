@@ -29,6 +29,7 @@ inline int popcount64(uint64_t x) {
 }
 
 struct B1LinearUserData {
+    int magic = 0x31423142;  // "1B1B" — identifies this op for GPU backends
     int in_dim;
     int out_dim;
 };
@@ -299,6 +300,7 @@ inline ggml_tensor * b1_linear(ggml_context * ctx, ggml_tensor * act, const B1We
 }
 
 struct Rope2DUserData {
+    int magic = 0x524F5045;  // "ROPE" — identifies this op for GPU backends
     int head_dim;
     int n_heads;
     int seq;
