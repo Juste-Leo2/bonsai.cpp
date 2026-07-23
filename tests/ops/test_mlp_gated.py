@@ -73,25 +73,21 @@ def test_mlp_gated_identity():
 
     seq = 4
     hidden_size = 8
-    mlp_hidden = 16
+    mlp_hidden = hidden_size
 
     x = torch.randn(seq, hidden_size)
 
-    # W_in tel que gate = x et val = x
     w_in = torch.zeros(hidden_size, mlp_hidden * 2)
     w_in[:hidden_size, :mlp_hidden] = torch.eye(hidden_size)
     w_in[:hidden_size, mlp_hidden:] = torch.eye(hidden_size)
 
-    # W_out tel que out = activated
-    w_out = torch.eye(mlp_hidden)[:hidden_size, :]
+    w_out = torch.eye(mlp_hidden)
 
     out = mlp_gated(x, w_in, w_out)
 
-    # Activé: SiLU(x) * x
     expected = F.silu(x) * x
+    assert torch.allclose(out, expected, atol=1e-5)
 
-    # Vérifie la forme (le résultat exact n'est pas identité car W_out tronque)
-    assert out.shape == (seq, hidden_size)
 
 
 if __name__ == "__main__":
