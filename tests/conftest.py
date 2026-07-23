@@ -99,6 +99,18 @@ def diffuser_gguf(request) -> Path:
 
 
 @pytest.fixture
+def diffuser_packed(request) -> Path:
+    path = request.config.getoption("--diffuser-gguf")
+    if path:
+        return Path(path).resolve()
+    default = PROJECT_ROOT / "models" / "flux2_4b_1bit.safetensors"
+    if default.exists():
+        return default
+    pytest.skip(f"Diffuser packed safetensors not found at {default}. "
+                f"Run convert_to_b1_0_packed.py first.")
+
+
+@pytest.fixture
 def diffuser_binary(request) -> Path:
     path = request.config.getoption("--diffuser-binary")
     if path:

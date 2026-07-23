@@ -7,15 +7,76 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from safetensors.numpy import safe_open as np_safe_open
+from diffusers import Flux2Transformer2DModel
 
 from tests.run_diffuser import (
     DiffuserParams,
     generate_synthetic_input,
-    load_hf_model,
     noise_pred_c_format,
 )
 
-COSINE_THRESHOLD = 0.90
+
+BLOCK_SIZE = 32
+BLOCK_BYTES = 6
+
+
+def dequantize_b1_0(raw: np.ndarray, out_dim: int, in_dim: int) -> np.ndarray:
+    """Dequantize a B1_0 packed uint8 tensor back to fp32 (out_dim, in_dim)."""
+    num_blocks = in_dim // BLOCK_SIZE
+    raw = raw.reshape(out_dim, num_blocks, BLOCK_BYTES)
+    lo = raw[:, :, 0].astype(np.uint16)
+    hi = raw[:, :, 1].astype(np.uint16)
+    scales = (lo | (hi << 8)).view(np.float16).astype(np.float32)
+    bits = np.unpackbits(raw[:, :, 2:6], axis=-1, bitorder="little").astype(np.float32)
+    signs = 2.0 * bits - 1.0
+    return (signs * scales[:, :, np.newaxis]).reshape(out_dim, in_dim)
+
+
+def load_hf_model_from_packed(safetensors_path: str, params: DiffuserParams, device="cpu"):
+    """Load a Flux2Transformer2DModel from a B1_0-packed safetensors file."""
+    print(f"  Loading model from {safetensors_path} ...", flush=True)
+    model = Flux2Transformer2DModel(
+        patch_size=1,
+        in_channels=params.in_channels,
+        out_channels=params.in_channels,
+        num_layers=params.depth,
+        num_single_layers=params.depth_single_blocks,
+        attention_head_dim=params.head_dim,
+        num_attention_heads=params.num_heads,
+        joint_attention_dim=params.context_in_dim,
+        mlp_ratio=params.mlp_ratio,
+        axes_dims_rope=params.axes_dim,
+        rope_theta=params.theta,
+        guidance_embeds=False,
+    )
+
+    state_dict = {}
+    with np_safe_open(safetensors_path, framework="np") as f:
+        for key in f.keys():
+            tensor = f.get_tensor(key)
+            if tensor.dtype == np.uint8:
+                out_dim = tensor.shape[0]
+                packed_cols = tensor.shape[1]
+                in_dim = (packed_cols // BLOCK_BYTES) * BLOCK_SIZE
+                state_dict[key] = torch.from_numpy(dequantize_b1_0(tensor, out_dim, in_dim))
+            else:
+                state_dict[key] = torch.from_numpy(tensor.astype(np.float32))
+
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    if missing:
+        raise RuntimeError(f"Missing keys: {missing}")
+    if unexpected:
+        raise RuntimeError(f"Unexpected keys: {unexpected}")
+
+    model = model.to(device, dtype=torch.bfloat16)
+    model.eval()
+
+    if device == "cuda":
+        torch.cuda.synchronize()
+        print(f"  VRAM used: {torch.cuda.memory_allocated() / 1024**3:.2f} GB", flush=True)
+
+    return model
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -23,15 +84,15 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     b_flat = b.ravel().astype(np.float64)
     dot = np.dot(a_flat, b_flat)
     norm = np.linalg.norm(a_flat) * np.linalg.norm(b_flat)
-    return float(dot / norm)
+    return float(dot / norm) if norm > 0 else 0.0
 
 
-def run_c_binary(diffuser_binary: Path, diffuser_gguf: Path, emb_path: Path, workdir: Path):
+def run_c_binary(diffuser_binary: Path, diffuser_model: Path, emb_path: Path, workdir: Path):
     """Lance le binaire C bonsai_diffuser et retourne le vecteur noise_pred."""
     result = subprocess.run(
         [
             str(diffuser_binary),
-            "--model", str(diffuser_gguf),
+            "--model", str(diffuser_model),
             "--embedding", str(emb_path),
             "-h", "64", "-w", "64",
             "--steps", "1", "--threads", "8",
@@ -44,13 +105,12 @@ def run_c_binary(diffuser_binary: Path, diffuser_gguf: Path, emb_path: Path, wor
     lat_final = np.fromfile(workdir / "latents_final.bin", dtype=np.float32)
     lat_initial = np.fromfile(workdir / "tmp" / "x_input.bin", dtype=np.float32)
     assert lat_final.size == lat_initial.size
-    return (lat_final - lat_initial).reshape(128, 4096)
+    return (lat_final - lat_initial).reshape(4096, 128)
 
 
 @pytest.mark.diffuser
 def test_diffuser_matches_hf(
-    diffuser_model: Path,
-    diffuser_gguf: Path,
+    diffuser_packed: Path,
     diffuser_binary: Path,
 ):
     params = DiffuserParams()
@@ -64,7 +124,6 @@ def test_diffuser_matches_hf(
         print("Generating synthetic inputs...", flush=True)
         inputs = generate_synthetic_input(params, seed=42)
 
-        # C binary looks for tmp/x_input.bin (hardcoded path)
         c_tmp = tmp / "tmp"
         c_tmp.mkdir(exist_ok=True)
         x_input_path = c_tmp / "x_input.bin"
@@ -77,51 +136,26 @@ def test_diffuser_matches_hf(
         emb_c.numpy().tofile(emb_path)
         print(f"  embeddings.bin: {list(emb_c.shape)}", flush=True)
 
-        # ── 2. Run C binary (once, reuse across comparisons) ──────────
-        print("Running C binary...", flush=True)
-        np_cpp = run_c_binary(diffuser_binary, diffuser_gguf, emb_path, tmp)
+        # ── 2. Run C binary (B1_0 packed safetensors) ─────────────────
+        print("Running C binary (B1_0 packed model)...", flush=True)
+        np_cpp = run_c_binary(diffuser_binary, diffuser_packed, emb_path, tmp)
         print(f"  C noise_pred: μ={np_cpp.mean():.4f} σ={np_cpp.std():.4f} "
               f"min={np_cpp.min():.4f} max={np_cpp.max():.4f}", flush=True)
 
-        # ── 3. HF reference (fp32 weights) ────────────────────────────
+        # ── 3. HF reference from packed safetensors ───────────────────
         t0 = time.time()
-        print("\n--- HF reference (fp32 weights) ---", flush=True)
-        model_fp = load_hf_model(str(diffuser_model), params, device, quantize_b1_0=False)
+        print("\n--- HF reference (dequantized B1_0 from packed safetensors) ---", flush=True)
+        model = load_hf_model_from_packed(str(diffuser_packed), params, device)
         print(f"  Model loaded in {time.time() - t0:.1f}s", flush=True)
+
         t1 = time.time()
-        np_fp = noise_pred_c_format(model_fp, inputs, device).cpu().numpy()
+        np_hf = noise_pred_c_format(model, inputs, device).cpu().numpy()
         print(f"  HF forward: {time.time() - t1:.1f}s", flush=True)
-        print(f"  stats: μ={np_fp.mean():.6f} σ={np_fp.std():.6f} "
-              f"min={np_fp.min():.6f} max={np_fp.max():.6f}", flush=True)
-        sim_fp = cosine_similarity(np_fp, np_cpp)
-        print(f"  Cosine similarity (C vs HF fp32): {sim_fp:.6f}", flush=True)
+        print(f"  stats: μ={np_hf.mean():.6f} σ={np_hf.std():.6f} "
+              f"min={np_hf.min():.6f} max={np_hf.max():.6f}", flush=True)
 
-        # ── 4. HF reference (B1_0 quantized weights) ──────────────────
-        del model_fp
-        if device == "cuda":
-            torch.cuda.empty_cache()
+        sim = cosine_similarity(np_hf, np_cpp)
+        print(f"  Cosine similarity (C vs HF dequantized B1_0): {sim:.6f}", flush=True)
 
-        t0 = time.time()
-        print("\n--- HF reference (B1_0 quantized weights) ---", flush=True)
-        model_b1 = load_hf_model(str(diffuser_model), params, device, quantize_b1_0=True)
-        print(f"  Model loaded in {time.time() - t0:.1f}s", flush=True)
-        t1 = time.time()
-        np_b1 = noise_pred_c_format(model_b1, inputs, device).cpu().numpy()
-        print(f"  HF forward: {time.time() - t1:.1f}s", flush=True)
-        print(f"  stats: μ={np_b1.mean():.6f} σ={np_b1.std():.6f} "
-              f"min={np_b1.min():.6f} max={np_b1.max():.6f}", flush=True)
-        sim_b1 = cosine_similarity(np_b1, np_cpp)
-        print(f"  Cosine similarity (C vs HF B1_0 quantized): {sim_b1:.6f}", flush=True)
-
-        # ── 5. Conclusions ────────────────────────────────────────────
-        print(f"\n{'='*60}", flush=True)
-        print(f"  C vs HF fp32:      {sim_fp:.6f}", flush=True)
-        print(f"  C vs HF B1_0:      {sim_b1:.6f}", flush=True)
-        print(f"  HF fp32 vs B1_0:   {cosine_similarity(np_fp, np_b1):.6f}", flush=True)
-        print(f"{'='*60}", flush=True)
-
-        # Le test valide si la version B1_0 quantifiée de PyTorch
-        # corrèle fortement avec le binaire C (graphe identique).
-        # Le seuil est plus bas car la quantification 1-bit est brutale.
-        assert sim_b1 >= 0.95, \
-            f"C vs B1_0 quantized cosine {sim_b1:.6f} < 0.95 — probable bug de graphe"
+        assert sim >= 0.95, \
+            f"C vs HF B1_0 cosine {sim:.6f} < 0.95 — probable bug de graphe"

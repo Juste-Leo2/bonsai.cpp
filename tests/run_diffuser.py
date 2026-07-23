@@ -157,7 +157,7 @@ def forward_one_step(model, inputs, device="cpu"):
 
 def noise_pred_c_format(model, inputs, device="cpu"):
     out = forward_one_step(model, inputs, device)
-    return out.squeeze(0).t().contiguous()  # (128, img_tokens)
+    return out.squeeze(0).contiguous()  # (img_tokens, channels)
 
 
 def save_bin(tensor, path):
