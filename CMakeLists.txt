@@ -133,3 +133,26 @@ target_include_directories(test_double_block PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
+# Test single block (Flux2SingleTransformerBlock)
+add_executable(test_single_block
+    tests/c_ops/test_single_block.cpp
+)
+
+target_link_libraries(test_single_block PRIVATE ggml ggml-cpu)
+target_include_directories(test_single_block PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+# Test output head
+add_executable(test_output_head
+    tests/c_ops/test_output_head.cpp
+)
+
+target_link_libraries(test_output_head PRIVATE ggml ggml-cpu)
+target_include_directories(test_output_head PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+)
+

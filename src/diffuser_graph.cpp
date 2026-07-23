@@ -284,7 +284,11 @@ DiffuserGraph build_diffuser_graph(
     ggml_tensor * w_txt = ggml_reshape_2d(ctx, weights.txt_in.data, ctx_dim, H);
     ggml_tensor * h_txt = ggml_mul_mat(ctx, w_txt, result.txt_in);
 
-    ggml_tensor * te = ggml_timestep_embedding(ctx, result.timestep, 256, 10000);
+    ggml_tensor * te_raw = ggml_timestep_embedding(ctx, result.timestep, 256, 10000);
+    // HF Timesteps(flip_sin_to_cos=True) → [sin, cos]; ggml → [cos, sin]. Swap halves.
+    ggml_tensor * te_cos = ggml_view_2d(ctx, te_raw, 128, 1, te_raw->nb[1], 0);
+    ggml_tensor * te_sin = ggml_view_2d(ctx, te_raw, 128, 1, te_raw->nb[1], 128 * sizeof(float));
+    ggml_tensor * te = ggml_concat(ctx, te_sin, te_cos, 0);
     ggml_format_name(te, "te_emb");
     ggml_tensor * w1_2d = ggml_reshape_2d(ctx, weights.time_in_w1.data, 256, H);
     te = ggml_mul_mat(ctx, w1_2d, te);
@@ -299,11 +303,12 @@ DiffuserGraph build_diffuser_graph(
     if (weights.time_in_b2.data) vec = ggml_add(ctx, vec, column_1d(ctx, weights.time_in_b2.data));
     ggml_format_name(vec, "vec_final");
 
-    ggml_tensor * vec_silu = ggml_silu(ctx, vec);
+    ggml_tensor * vec_col = ggml_reshape_2d(ctx, vec, H, 1);
+    ggml_tensor * vec_norm = ggml_norm(ctx, vec_col, 1e-6f);
     ggml_tensor * w_mod_img = ggml_reshape_2d(ctx, weights.double_mod_img.data, H, 6 * H);
-    ggml_tensor * mod_img_raw = ggml_mul_mat(ctx, w_mod_img, vec_silu);
+    ggml_tensor * mod_img_raw = ggml_mul_mat(ctx, w_mod_img, vec_norm);
     ggml_tensor * w_mod_txt = ggml_reshape_2d(ctx, weights.double_mod_txt.data, H, 6 * H);
-    ggml_tensor * mod_txt_raw = ggml_mul_mat(ctx, w_mod_txt, vec_silu);
+    ggml_tensor * mod_txt_raw = ggml_mul_mat(ctx, w_mod_txt, vec_norm);
 
     int B = batch;
     (void)B;
@@ -459,7 +464,7 @@ DiffuserGraph build_diffuser_graph(
     ggml_tensor * combined = ggml_concat(ctx, h_txt, h_img, 1);
 
     ggml_tensor * w_single = ggml_reshape_2d(ctx, weights.single_mod.data, H, 3 * H);
-    ggml_tensor * mod_single_raw = ggml_mul_mat(ctx, w_single, vec_silu);
+    ggml_tensor * mod_single_raw = ggml_mul_mat(ctx, w_single, vec_norm);
     ModSplit single_mod;
     split_mod_single(ctx, mod_single_raw, H, 1, single_mod);
 
@@ -532,7 +537,7 @@ DiffuserGraph build_diffuser_graph(
 
     ggml_tensor * fn = ggml_norm(ctx, final_img, 1e-6f);
     ggml_tensor * w_norm_out = ggml_reshape_2d(ctx, weights.norm_out_linear.data, H, 2 * H);
-    ggml_tensor * mod_out_raw = ggml_mul_mat(ctx, w_norm_out, vec_silu);
+    ggml_tensor * mod_out_raw = ggml_mul_mat(ctx, w_norm_out, vec_norm);
     ggml_tensor * mod_out_scale = ggml_view_2d(ctx, mod_out_raw, H, 1, mod_out_raw->nb[1], 0);
     ggml_tensor * mod_out_shift = ggml_view_2d(ctx, mod_out_raw, H, 1, mod_out_raw->nb[1], H * sizeof(float));
 
