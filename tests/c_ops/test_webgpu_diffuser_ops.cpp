@@ -290,7 +290,7 @@ static bool test_single_block(ggml_backend_t cpu, ggml_backend_t gpu) {
         k3 = rms_norm_qk(ctx, k3, n_k, hd);
 
         // rope
-        std::vector<Rope2DUserData> rod;
+        std::vector<Rope2DUserData> rod; rod.reserve(8);
         rod.push_back({0x524F5045, hd, nh, total_t});
         q3 = rope_2d_fwd(ctx, q3, c_t, s_t, rod.back());
         rod.push_back({0x524F5045, hd, nh, total_t});
@@ -403,7 +403,8 @@ static bool test_double_block(ggml_backend_t cpu, ggml_backend_t gpu) {
         ggml_tensor *naq=ggml_new_tensor_1d(ctx,GGML_TYPE_F32,hd);
         ggml_tensor *nak=ggml_new_tensor_1d(ctx,GGML_TYPE_F32,hd);
 
-        std::vector<B1LinearUserData> bud; std::vector<Rope2DUserData> rud;
+        std::vector<B1LinearUserData> bud; bud.reserve(32);
+        std::vector<Rope2DUserData> rud; rud.reserve(16);
         auto b1=[&](ggml_tensor *a,B1Weights &w){
             bud.push_back({0x31423142,w.in_dim,w.out_dim});
             return b1_linear(ctx,a,w,4,bud.back());};
@@ -517,8 +518,7 @@ int main() {
     ok &= test_timestep(cpu, gpu);
     ok &= test_output_head(cpu, gpu);
     ok &= test_single_block(cpu, gpu);
-    // TODO: test_double_block hangs on GPU — needs investigation
-    // ok &= test_double_block(cpu, gpu);
+    ok &= test_double_block(cpu, gpu);
 
     ggml_backend_free(gpu);
     ggml_backend_free(cpu);
