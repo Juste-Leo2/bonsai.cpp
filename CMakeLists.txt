@@ -184,3 +184,16 @@ target_include_directories(test_webgpu_add PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
+# Test full diffuser pipeline ops on WebGPU (GPU vs CPU)
+add_executable(test_webgpu_diffuser_ops
+    tests/c_ops/test_webgpu_diffuser_ops.cpp
+)
+target_link_libraries(test_webgpu_diffuser_ops PRIVATE ggml ggml-cpu ggml-webgpu)
+target_include_directories(test_webgpu_diffuser_ops PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+install(TARGETS test_webgpu_diffuser_ops RUNTIME DESTINATION bin)
+
