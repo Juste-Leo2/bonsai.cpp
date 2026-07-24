@@ -72,6 +72,22 @@ target_include_directories(bonsai_diffuser PRIVATE
 
 install(TARGETS bonsai_diffuser RUNTIME DESTINATION bin)
 
+# --- bonsai_diffuser_webgpu: WebGPU backend for Flux diffusion ---
+add_executable(bonsai_diffuser_webgpu
+    src/diffuser_webgpu.cpp
+    src/diffuser_graph.cpp
+)
+
+target_link_libraries(bonsai_diffuser_webgpu PRIVATE ggml ggml-cpu ggml-webgpu)
+target_include_directories(bonsai_diffuser_webgpu PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+install(TARGETS bonsai_diffuser_webgpu RUNTIME DESTINATION bin)
+
 # --- Tests unitaires des opérations diffuser ---
 # Test b1_linear: multiplication matricielle quantifiée B1_0
 add_executable(test_b1_linear

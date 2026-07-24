@@ -201,8 +201,11 @@ int main(int argc, char ** argv) {
     struct ggml_init_params cparams = { 256ULL * 1024 * 1024, NULL, true };
     ggml_context * ctx_compute = ggml_init(cparams);
 
+    auto freqs_data = compute_rope_freqs_data(params.axes_dim, 4, (float)params.theta);
+    ggml_tensor * freqs_table = ggml_new_tensor_2d(ctx_compute, GGML_TYPE_F32, freqs_data.max_half, freqs_data.n_axes);
+
     DiffuserGraph dg = build_diffuser_graph(
-        ctx_compute, params, w,
+        ctx_compute, params, w, freqs_table,
         img_tokens, txt_tokens, 1, n_threads,
         max_depth, max_single);
 
@@ -214,6 +217,8 @@ int main(int argc, char ** argv) {
     ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
     ggml_gallocr_reserve(galloc, dg.graph);
     ggml_gallocr_alloc_graph(galloc, dg.graph);
+
+    memcpy(freqs_table->data, freqs_data.values.data(), freqs_data.values.size() * sizeof(float));
     size_t alloc_size = ggml_gallocr_get_buffer_size(galloc, 0);
     fprintf(stdout, "Graph allocator reserved %zu MB for intermediate tensors\n",
             alloc_size / 1024 / 1024);
