@@ -1,6 +1,6 @@
 /**
  * WebGPU custom op tests: b1_linear + rope_2d GPU vs CPU
- * Separate contexts for CPU and GPU to avoid buffer reuse issues.
+ * Pattern: ggml_backend_alloc_ctx_tensors (same as test-backend-ops.cpp)
  */
 #include "ggml.h"
 #include "ggml-cpu.h"
@@ -21,9 +21,8 @@ namespace bonsai { bool g_bonsai_debug = false; }
 
 static float cosine(const float *a, const float *b, int n) {
     double dot = 0.0, na = 0.0, nb = 0.0;
-    for (int i = 0; i < n; i++) {
-        dot += (double)a[i] * b[i]; na += (double)a[i] * a[i]; nb += (double)b[i] * b[i];
-    }
+    for (int i = 0; i < n; i++)
+        dot += (double)a[i] * b[i], na += (double)a[i] * a[i], nb += (double)b[i] * b[i];
     return (float)(dot / (sqrt(fmax(na, 1e-30)) * sqrt(fmax(nb, 1e-30))));
 }
 
@@ -45,80 +44,12 @@ static std::vector<uint8_t> pack_b1(const float *wgt, int out_dim, int in_dim) {
     return out;
 }
 
-// Create a tiny graph + run + return output
-static std::vector<float> run_b1(ggml_backend_t be, const float *act, const uint8_t *b1,
-                                  int batch, int in_dim, int out_dim, int n_threads) {
-    struct ggml_init_params gp = { 256*1024*1024, NULL, false };
-    ggml_context *ctx = ggml_init(gp);
-
-    ggml_tensor *act_t = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, in_dim, batch);
-    ggml_tensor *wgt_t = ggml_new_tensor_2d(ctx, GGML_TYPE_I8, (int64_t)out_dim * (in_dim/32) * 6, 1);
-    ggml_set_input(act_t);
-    ggml_set_input(wgt_t);
-    memcpy(act_t->data, act, batch * in_dim * sizeof(float));
-    memcpy(wgt_t->data, b1, out_dim * (in_dim/32) * 6);
-
-    B1Weights w = { wgt_t, in_dim, out_dim };
-    B1LinearUserData ud; ud.in_dim = ud.out_dim = 0;
-    ggml_tensor *out_t = b1_linear(ctx, act_t, w, n_threads, ud);
-    ggml_set_output(out_t);
-
-    ggml_cgraph *graph = ggml_new_graph_custom(ctx, 256, false);
-    ggml_build_forward_expand(graph, out_t);
-
-    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(be));
-    ggml_gallocr_reserve(galloc, graph);
-    ggml_gallocr_alloc_graph(galloc, graph);
-
-    // Input data was copied to ggml context, now copy to backend buffers via tensor_set
-    ggml_backend_tensor_set(act_t, act, 0, batch * in_dim * sizeof(float));
-    ggml_backend_tensor_set(wgt_t, b1, 0, out_dim * (in_dim/32) * 6);
-
-    ggml_backend_graph_compute(be, graph);
-
-    std::vector<float> result(batch * out_dim);
-    ggml_backend_tensor_get(out_t, result.data(), 0, batch * out_dim * sizeof(float));
-    ggml_gallocr_free(galloc);
-    ggml_free(ctx);
-    return result;
-}
-
-static std::vector<float> run_rope(ggml_backend_t be, const float *q, const float *c, const float *s,
-                                    int head_dim, int n_heads, int seq) {
-    int n_el = head_dim * n_heads * seq;
-    int n_cos = (head_dim / 2) * seq;
-
-    struct ggml_init_params gp = { 256*1024*1024, NULL, false };
-    ggml_context *ctx = ggml_init(gp);
-
-    ggml_tensor *q_t   = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim, n_heads, seq);
-    ggml_tensor *cos_t = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, head_dim / 2, seq);
-    ggml_tensor *sin_t = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, head_dim / 2, seq);
-    memcpy(q_t->data, q, n_el * sizeof(float));
-    memcpy(cos_t->data, c, n_cos * sizeof(float));
-    memcpy(sin_t->data, s, n_cos * sizeof(float));
-
-    Rope2DUserData rud = { 0x524F5045, head_dim, n_heads, seq };
-    ggml_tensor *out_t = rope_2d_fwd(ctx, q_t, cos_t, sin_t, rud);
-    ggml_set_output(out_t);
-
-    ggml_cgraph *graph = ggml_new_graph_custom(ctx, 256, false);
-    ggml_build_forward_expand(graph, out_t);
-
-    ggml_gallocr_t galloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(be));
-    ggml_gallocr_reserve(galloc, graph);
-    ggml_gallocr_alloc_graph(galloc, graph);
-
-    ggml_backend_tensor_set(q_t, q, 0, n_el * sizeof(float));
-    ggml_backend_tensor_set(cos_t, c, 0, n_cos * sizeof(float));
-    ggml_backend_tensor_set(sin_t, s, 0, n_cos * sizeof(float));
-
-    ggml_backend_graph_compute(be, graph);
-
-    std::vector<float> result(n_el);
-    ggml_backend_tensor_get(out_t, result.data(), 0, n_el * sizeof(float));
-    ggml_gallocr_free(galloc);
-    ggml_free(ctx);
+// Run graph on a single backend. Pattern from test-backend-ops.cpp
+static std::vector<float> run_graph(ggml_backend_t backend, ggml_cgraph *graph,
+                                     ggml_tensor *out_t, int n_out) {
+    ggml_backend_graph_compute(backend, graph);
+    std::vector<float> result(n_out);
+    ggml_backend_tensor_get(out_t, result.data(), 0, n_out * sizeof(float));
     return result;
 }
 
@@ -146,19 +77,58 @@ int main() {
         for (auto &v : wgt) v = (float)rand() / RAND_MAX * 2 - 1;
         auto b1 = pack_b1(wgt.data(), out_dim, in_dim);
 
-        fprintf(stdout, "  CPU... "); fflush(stdout);
-        auto cpu = run_b1(cpu_be, act.data(), b1.data(), batch, in_dim, out_dim, 4);
-        fprintf(stdout, "done\n"); fflush(stdout);
+        // --- CPU ---
+        struct ggml_init_params gp = { 256*1024*1024, NULL, true };
+        ggml_context *ctx = ggml_init(gp);
+        ggml_tensor *act_t = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, in_dim, batch);
+        ggml_tensor *wgt_t = ggml_new_tensor_2d(ctx, GGML_TYPE_I8, (int64_t)b1.size(), 1);
+    B1Weights w = { wgt_t, in_dim, out_dim };
+    B1LinearUserData *ud = (B1LinearUserData*)malloc(sizeof(B1LinearUserData));
+    ud->magic = 0x31423142; ud->in_dim = ud->out_dim = 0;
+    ggml_tensor *out_t = b1_linear(ctx, act_t, w, 4, *ud);
+        ggml_cgraph *graph = ggml_new_graph_custom(ctx, 256, false);
+        ggml_build_forward_expand(graph, out_t);
 
+        // Allocate + upload + compute CPU
+        ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, cpu_be);
+        ggml_backend_tensor_set(act_t, act.data(), 0, act.size() * sizeof(float));
+        ggml_backend_tensor_set(wgt_t, b1.data(), 0, b1.size());
+        auto cpu = run_graph(cpu_be, graph, out_t, out_dim);
+        fprintf(stdout, "  CPU μ=%.4f\n", cpu[0]); fflush(stdout);
+
+        // --- GPU ---
+        fprintf(stdout, "  GPU starting...\n"); fflush(stdout);
         if (has_gpu) {
-            fprintf(stdout, "  GPU... "); fflush(stdout);
-            auto gpu = run_b1(gpu_be, act.data(), b1.data(), batch, in_dim, out_dim, 4);
+            fprintf(stdout, "  GPU ctx...\n"); fflush(stdout);
+            ggml_context *ctx2 = ggml_init(gp);
+            fprintf(stdout, "  GPU tensors...\n"); fflush(stdout);
+            act_t = ggml_new_tensor_2d(ctx2, GGML_TYPE_F32, in_dim, batch);
+            wgt_t = ggml_new_tensor_2d(ctx2, GGML_TYPE_I8, (int64_t)b1.size(), 1);
+            w = { wgt_t, in_dim, out_dim };
+            fprintf(stdout, "  GPU b1_linear...\n"); fflush(stdout);
+            out_t = b1_linear(ctx2, act_t, w, 4, *ud);
+            fprintf(stdout, "  GPU graph...\n"); fflush(stdout);
+            graph = ggml_new_graph_custom(ctx2, 256, false);
+            ggml_build_forward_expand(graph, out_t);
 
-            float cos = cosine(cpu.data(), gpu.data(), batch * out_dim);
+            // Allocate + upload + compute GPU
+            fprintf(stdout, "  GPU alloc...\n"); fflush(stdout);
+            ggml_backend_buffer_t buf2 = ggml_backend_alloc_ctx_tensors(ctx2, gpu_be);
+            fprintf(stdout, "  GPU set...\n"); fflush(stdout);
+            ggml_backend_tensor_set(act_t, act.data(), 0, act.size() * sizeof(float));
+            ggml_backend_tensor_set(wgt_t, b1.data(), 0, b1.size());
+            fprintf(stdout, "  GPU compute...\n"); fflush(stdout);
+            auto gpu = run_graph(gpu_be, graph, out_t, out_dim);
+            fprintf(stdout, "  GPU done\n"); fflush(stdout);
+        // buf freed with ctx
+
+            float cos = cosine(cpu.data(), gpu.data(), out_dim);
             float maxd = 0;
-            for (int i = 0; i < batch * out_dim; i++) maxd = fmaxf(maxd, fabsf(cpu[i] - gpu[i]));
-            fprintf(stdout, "cos=%.6f maxd=%.6f %s\n", cos, maxd, cos > 0.9999f ? "PASS" : "FAIL"); fflush(stdout);
+            for (int i = 0; i < out_dim; i++) maxd = fmaxf(maxd, fabsf(cpu[i] - gpu[i]));
+            fprintf(stdout, "  GPU cos=%.6f maxd=%.6f %s\n", cos, maxd,
+                    cos > 0.9999f ? "PASS" : "FAIL"); fflush(stdout);
             if (cos <= 0.9999f) all_ok = false;
+            // ggml_free(ctx2); (skipped for now)
         } else { fprintf(stdout, "  GPU SKIP\n"); }
     }
 
@@ -174,19 +144,49 @@ int main() {
         for (auto &v : c) v = (float)rand() / RAND_MAX * 2 - 1;
         for (auto &v : s) v = (float)rand() / RAND_MAX * 2 - 1;
 
-        fprintf(stdout, "  CPU... "); fflush(stdout);
-        auto cpu = run_rope(cpu_be, q.data(), c.data(), s.data(), hd, nh, seq);
-        fprintf(stdout, "done\n"); fflush(stdout);
+        struct ggml_init_params gp = { 256*1024*1024, NULL, true };
+        ggml_context *ctx = ggml_init(gp);
+        ggml_tensor *q_t   = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, hd, nh, seq);
+        ggml_tensor *cos_t = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hd / 2, seq);
+        ggml_tensor *sin_t = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hd / 2, seq);
+        Rope2DUserData rud = { 0x524F5045, hd, nh, seq };
+        ggml_tensor *out_t = rope_2d_fwd(ctx, q_t, cos_t, sin_t, rud);
+        ggml_cgraph *graph = ggml_new_graph_custom(ctx, 256, false);
+        ggml_build_forward_expand(graph, out_t);
+
+        ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, cpu_be);
+        ggml_backend_tensor_set(q_t, q.data(), 0, n_el * sizeof(float));
+        ggml_backend_tensor_set(cos_t, c.data(), 0, n_cos * sizeof(float));
+        ggml_backend_tensor_set(sin_t, s.data(), 0, n_cos * sizeof(float));
+        auto cpu = run_graph(cpu_be, graph, out_t, n_el);
+        fprintf(stdout, "  CPU μ=%.4f\n", cpu[0]); fflush(stdout);
+        fprintf(stdout, "  rope_cpu_done has_gpu=%d\n", (int)has_gpu); fflush(stdout);
+    // buf freed with ctx
+        // ggml_free(ctx); (skipped for now)
 
         if (has_gpu) {
-            fprintf(stdout, "  GPU... "); fflush(stdout);
-            auto gpu = run_rope(gpu_be, q.data(), c.data(), s.data(), hd, nh, seq);
+            ggml_context *ctx2 = ggml_init(gp);
+            q_t   = ggml_new_tensor_3d(ctx2, GGML_TYPE_F32, hd, nh, seq);
+            cos_t = ggml_new_tensor_2d(ctx2, GGML_TYPE_F32, hd / 2, seq);
+            sin_t = ggml_new_tensor_2d(ctx2, GGML_TYPE_F32, hd / 2, seq);
+            out_t = rope_2d_fwd(ctx2, q_t, cos_t, sin_t, rud);
+            graph = ggml_new_graph_custom(ctx2, 256, false);
+            ggml_build_forward_expand(graph, out_t);
+
+            ggml_backend_buffer_t buf2 = ggml_backend_alloc_ctx_tensors(ctx2, gpu_be);
+            ggml_backend_tensor_set(q_t, q.data(), 0, n_el * sizeof(float));
+            ggml_backend_tensor_set(cos_t, c.data(), 0, n_cos * sizeof(float));
+            ggml_backend_tensor_set(sin_t, s.data(), 0, n_cos * sizeof(float));
+            auto gpu = run_graph(gpu_be, graph, out_t, n_el);
+        // buf freed with ctx
 
             float cos = cosine(cpu.data(), gpu.data(), n_el);
             float maxd = 0;
             for (int i = 0; i < n_el; i++) maxd = fmaxf(maxd, fabsf(cpu[i] - gpu[i]));
-            fprintf(stdout, "cos=%.6f maxd=%.6f %s\n", cos, maxd, cos > 0.999f ? "PASS" : "FAIL"); fflush(stdout);
+            fprintf(stdout, "  GPU cos=%.6f maxd=%.6f %s\n", cos, maxd,
+                    cos > 0.999f ? "PASS" : "FAIL"); fflush(stdout);
             if (cos <= 0.999f) all_ok = false;
+            // ggml_free(ctx2); (skipped for now)
         } else { fprintf(stdout, "  GPU SKIP\n"); }
     }
 

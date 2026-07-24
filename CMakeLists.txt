@@ -170,4 +170,17 @@ target_include_directories(test_webgpu_ops PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/src
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
+install(TARGETS test_webgpu_ops RUNTIME DESTINATION bin)
+
+# Minimal test: ggml_add on WebGPU (sanity check)
+add_executable(test_webgpu_add
+    tests/c_ops/test_webgpu_add.cpp
+)
+target_link_libraries(test_webgpu_add PRIVATE ggml ggml-cpu ggml-webgpu)
+target_include_directories(test_webgpu_add PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
 
