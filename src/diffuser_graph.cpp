@@ -197,9 +197,9 @@ static void apply_rope_2d(
 {
     int n_heads = q->ne[1];
     int seq     = q->ne[2];
-    rope_ud.push_back({head_dim, n_heads, seq});
+    rope_ud.push_back({0x524F5045, head_dim, n_heads, seq});
     *q_out = rope_2d_fwd(ctx, q, cos_t, sin_t, rope_ud.back());
-    rope_ud.push_back({head_dim, n_heads, seq});
+    rope_ud.push_back({0x524F5045, head_dim, n_heads, seq});
     *k_out = rope_2d_fwd(ctx, k, cos_t, sin_t, rope_ud.back());
 }
 
@@ -276,7 +276,7 @@ DiffuserGraph build_diffuser_graph(
 
     int ud_idx = 0;
     auto b1 = [&](ggml_tensor * act, const B1Weights & w) -> ggml_tensor * {
-        result.b1_ud.push_back({w.in_dim, w.out_dim});
+        result.b1_ud.push_back({0x31423142, w.in_dim, w.out_dim});
         (void)ud_idx;
         return b1_linear(ctx, act, w, n_threads, result.b1_ud.back());
     };
