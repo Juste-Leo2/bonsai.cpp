@@ -139,7 +139,7 @@ def test_diffuser_matches_hf(
         # ── 2. Run C binary (B1_0 packed safetensors) ─────────────────
         print("Running C binary (B1_0 packed model)...", flush=True)
         np_cpp = run_c_binary(diffuser_binary, diffuser_packed, emb_path, tmp)
-        print(f"  C noise_pred: μ={np_cpp.mean():.4f} σ={np_cpp.std():.4f} "
+        print(f"  C noise_pred: mu={np_cpp.mean():.4f} std={np_cpp.std():.4f} "
               f"min={np_cpp.min():.4f} max={np_cpp.max():.4f}", flush=True)
 
         # ── 3. HF reference from packed safetensors ───────────────────
@@ -151,7 +151,7 @@ def test_diffuser_matches_hf(
         t1 = time.time()
         np_hf = noise_pred_c_format(model, inputs, device).cpu().numpy()
         print(f"  HF forward: {time.time() - t1:.1f}s", flush=True)
-        print(f"  stats: μ={np_hf.mean():.6f} σ={np_hf.std():.6f} "
+        print(f"  stats: mu={np_hf.mean():.6f} std={np_hf.std():.6f} "
               f"min={np_hf.min():.6f} max={np_hf.max():.6f}", flush=True)
 
         # ── 4. Multi-metric comparison ─────────────────────────────
@@ -186,8 +186,8 @@ def test_diffuser_matches_hf(
 
         # Per-position std: how much does each pixel deviate in noise space?
         diff = np_hf - np_cpp
-        print(f"  Diff μ={diff.mean():.6f} σ={diff.std():.6f} "
-              f"|σ_diff|/|σ_hf|={diff.std()/np_hf.std():.3f}", flush=True)
+        print(f"  Diff mu={diff.mean():.6f} std={diff.std():.6f} "
+              f"|s_diff|/|s_hf|={diff.std()/np_hf.std():.3f}", flush=True)
 
         print(f"{'='*60}", flush=True)
 
@@ -230,7 +230,7 @@ def test_diffuser_gpu_vs_hf(
         # ── 2. Run GPU binary (B1_0 packed safetensors) ───────────────
         print("Running GPU binary (B1_0 packed model)...", flush=True)
         np_gpu = run_c_binary(diffuser_webgpu_binary, diffuser_packed, emb_path, tmp)
-        print(f"  GPU noise_pred: μ={np_gpu.mean():.4f} σ={np_gpu.std():.4f} "
+        print(f"  GPU noise_pred: mu={np_gpu.mean():.4f} std={np_gpu.std():.4f} "
               f"min={np_gpu.min():.4f} max={np_gpu.max():.4f}", flush=True)
 
         # ── 3. HF reference from packed safetensors ───────────────────
@@ -242,7 +242,7 @@ def test_diffuser_gpu_vs_hf(
         t1 = time.time()
         np_hf = noise_pred_c_format(model, inputs, device).cpu().numpy()
         print(f"  HF forward: {time.time() - t1:.1f}s", flush=True)
-        print(f"  stats: μ={np_hf.mean():.6f} σ={np_hf.std():.6f} "
+        print(f"  stats: mu={np_hf.mean():.6f} std={np_hf.std():.6f} "
               f"min={np_hf.min():.6f} max={np_hf.max():.6f}", flush=True)
 
         # ── 4. Comparison ─────────────────────────────────────────────
@@ -260,8 +260,8 @@ def test_diffuser_gpu_vs_hf(
         print(f"  Sign agreement:          {sign_agree*100:.2f}%", flush=True)
 
         diff = np_hf - np_gpu
-        print(f"  Diff μ={diff.mean():.6f} σ={diff.std():.6f} "
-              f"|σ_diff|/|σ_hf|={diff.std()/np_hf.std():.3f}", flush=True)
+        print(f"  Diff mu={diff.mean():.6f} std={diff.std():.6f} "
+              f"|s_diff|/|s_hf|={diff.std()/np_hf.std():.3f}", flush=True)
         print(f"{'='*60}", flush=True)
 
         assert sim >= 0.70, \

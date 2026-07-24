@@ -15,7 +15,7 @@
 #include "diffuser_types.h"
 #include "diffuser_graph.h"
 #include "b1_0_kernel.h"
-#include "safetensors.h"
+#include "safetensors_win.h"
 
 using namespace bonsai;
 
@@ -31,7 +31,7 @@ struct DeferredUpload {
 
 static void make_f32_weight(
     ggml_context * ctx,
-    const SafeTensor & st,
+    const SafeTensorWin & st,
     FPWeights & out,
     std::vector<DeferredUpload> & uploads)
 {
@@ -48,7 +48,7 @@ static void make_f32_weight(
 
 static void make_b1_weight(
     ggml_context * ctx,
-    const SafeTensor & st,
+    const SafeTensorWin & st,
     B1Weights & out,
     std::vector<DeferredUpload> & uploads)
 {
@@ -63,10 +63,17 @@ static void make_b1_weight(
     uploads.push_back({out.data, st.data, nbytes});
 }
 
-static const SafeTensor & require(const SafetensorsFile & st, const char * name) {
+template <typename ST>
+static const SafeTensorWin & require(const ST & st, const char * name) {
     auto * p = st.find(name);
-    if (!p) { fprintf(stderr, "FATAL: weight '%s' not found in safetensors\n", name); abort(); }
+    if (!p) { fprintf(stderr, "FATAL: weight '%s' not found\n", name); abort(); }
     return *p;
+}
+
+static void upload_all(ggml_backend_t gpu, const std::vector<DeferredUpload> & uploads) {
+    for (auto & u : uploads) {
+        ggml_backend_tensor_set(u.tensor, u.data, 0, u.size);
+    }
 }
 
 int main(int argc, char ** argv) {
@@ -97,7 +104,7 @@ int main(int argc, char ** argv) {
 
     // ── 1. Open safetensors ────────────────────────────────────────
     fprintf(stdout, "Loading model from %s...\n", model_path.c_str());
-    SafetensorsFile st;
+    SafetensorsFileWin st;
     st.open(model_path);
 
     DiffuserParams params;
@@ -107,105 +114,102 @@ int main(int argc, char ** argv) {
     int img_tokens = im_H * im_W;
     int txt_tokens = 512;
 
-    // ── 2. Create ggml context for weights + graph ────────────────
-    struct ggml_init_params gparams = { 128ULL * 1024 * 1024, NULL, true };
-    ggml_context * ctx = ggml_init(gparams);
+    // ── 2. Load weight tensors into a dedicated context ────────────
+    struct ggml_init_params wparams = { 64ULL * 1024 * 1024, NULL, true };
+    ggml_context * ctx_weights = ggml_init(wparams);
 
     std::vector<DeferredUpload> uploads;
-
     DiffuserWeights w;
 
     // Edge projections (F32)
-    make_f32_weight(ctx, require(st, "x_embedder.weight"), w.img_in, uploads);
-    make_f32_weight(ctx, require(st, "context_embedder.weight"), w.txt_in, uploads);
+    make_f32_weight(ctx_weights, require(st, "x_embedder.weight"), w.img_in, uploads);
+    make_f32_weight(ctx_weights, require(st, "context_embedder.weight"), w.txt_in, uploads);
 
     // Time guidance (F32)
-    make_f32_weight(ctx, require(st, "time_guidance_embed.timestep_embedder.linear_1.weight"), w.time_in_w1, uploads);
+    make_f32_weight(ctx_weights, require(st, "time_guidance_embed.timestep_embedder.linear_1.weight"), w.time_in_w1, uploads);
     w.time_in_b1.data = nullptr;
-    make_f32_weight(ctx, require(st, "time_guidance_embed.timestep_embedder.linear_2.weight"), w.time_in_w2, uploads);
+    make_f32_weight(ctx_weights, require(st, "time_guidance_embed.timestep_embedder.linear_2.weight"), w.time_in_w2, uploads);
     w.time_in_b2.data = nullptr;
 
     // Modulations (F32)
-    make_f32_weight(ctx, require(st, "double_stream_modulation_img.linear.weight"), w.double_mod_img, uploads);
-    make_f32_weight(ctx, require(st, "double_stream_modulation_txt.linear.weight"), w.double_mod_txt, uploads);
-    make_f32_weight(ctx, require(st, "single_stream_modulation.linear.weight"), w.single_mod, uploads);
+    make_f32_weight(ctx_weights, require(st, "double_stream_modulation_img.linear.weight"), w.double_mod_img, uploads);
+    make_f32_weight(ctx_weights, require(st, "double_stream_modulation_txt.linear.weight"), w.double_mod_txt, uploads);
+    make_f32_weight(ctx_weights, require(st, "single_stream_modulation.linear.weight"), w.single_mod, uploads);
 
-    // ── Double blocks ──────────────────────────────────────────────
+    // Double blocks
     w.double_blocks.resize(params.depth);
     for (int d = 0; d < params.depth; d++) {
         auto & db = w.double_blocks[d];
         char buf[256];
 
-#define MAKE_B1(field, fmt) \
+#define LOAD_B1(field, fmt) \
         snprintf(buf, sizeof(buf), fmt, d); \
-        make_b1_weight(ctx, require(st, buf), db.field, uploads);
+        make_b1_weight(ctx_weights, require(st, buf), db.field, uploads);
 
-#define MAKE_F32_1D(field, fmt) \
+#define LOAD_F32_1D(field, fmt) \
         snprintf(buf, sizeof(buf), fmt, d); \
         { \
             const auto & s = require(st, buf); \
-            db.field.data = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, params.head_dim); \
+            db.field.data = ggml_new_tensor_1d(ctx_weights, GGML_TYPE_F32, params.head_dim); \
             uploads.push_back({db.field.data, s.data, (size_t)params.head_dim * sizeof(float)}); \
         }
 
-        MAKE_B1(attn_to_q,   "transformer_blocks.%d.attn.to_q.weight");
-        MAKE_B1(attn_to_k,   "transformer_blocks.%d.attn.to_k.weight");
-        MAKE_B1(attn_to_v,   "transformer_blocks.%d.attn.to_v.weight");
-        MAKE_B1(attn_to_out, "transformer_blocks.%d.attn.to_out.0.weight");
-        MAKE_F32_1D(attn_norm_q, "transformer_blocks.%d.attn.norm_q.weight");
-        MAKE_F32_1D(attn_norm_k, "transformer_blocks.%d.attn.norm_k.weight");
+        LOAD_B1(attn_to_q,   "transformer_blocks.%d.attn.to_q.weight");
+        LOAD_B1(attn_to_k,   "transformer_blocks.%d.attn.to_k.weight");
+        LOAD_B1(attn_to_v,   "transformer_blocks.%d.attn.to_v.weight");
+        LOAD_B1(attn_to_out, "transformer_blocks.%d.attn.to_out.0.weight");
+        LOAD_F32_1D(attn_norm_q, "transformer_blocks.%d.attn.norm_q.weight");
+        LOAD_F32_1D(attn_norm_k, "transformer_blocks.%d.attn.norm_k.weight");
+        LOAD_B1(attn_add_q,    "transformer_blocks.%d.attn.add_q_proj.weight");
+        LOAD_B1(attn_add_k,    "transformer_blocks.%d.attn.add_k_proj.weight");
+        LOAD_B1(attn_add_v,    "transformer_blocks.%d.attn.add_v_proj.weight");
+        LOAD_B1(attn_add_out,  "transformer_blocks.%d.attn.to_add_out.weight");
+        LOAD_F32_1D(attn_norm_added_q, "transformer_blocks.%d.attn.norm_added_q.weight");
+        LOAD_F32_1D(attn_norm_added_k, "transformer_blocks.%d.attn.norm_added_k.weight");
+        LOAD_B1(ff_linear_in,       "transformer_blocks.%d.ff.linear_in.weight");
+        LOAD_B1(ff_linear_out,      "transformer_blocks.%d.ff.linear_out.weight");
+        LOAD_B1(ff_ctx_linear_in,   "transformer_blocks.%d.ff_context.linear_in.weight");
+        LOAD_B1(ff_ctx_linear_out,  "transformer_blocks.%d.ff_context.linear_out.weight");
 
-        MAKE_B1(attn_add_q,    "transformer_blocks.%d.attn.add_q_proj.weight");
-        MAKE_B1(attn_add_k,    "transformer_blocks.%d.attn.add_k_proj.weight");
-        MAKE_B1(attn_add_v,    "transformer_blocks.%d.attn.add_v_proj.weight");
-        MAKE_B1(attn_add_out,  "transformer_blocks.%d.attn.to_add_out.weight");
-        MAKE_F32_1D(attn_norm_added_q, "transformer_blocks.%d.attn.norm_added_q.weight");
-        MAKE_F32_1D(attn_norm_added_k, "transformer_blocks.%d.attn.norm_added_k.weight");
-
-        MAKE_B1(ff_linear_in,       "transformer_blocks.%d.ff.linear_in.weight");
-        MAKE_B1(ff_linear_out,      "transformer_blocks.%d.ff.linear_out.weight");
-        MAKE_B1(ff_ctx_linear_in,   "transformer_blocks.%d.ff_context.linear_in.weight");
-        MAKE_B1(ff_ctx_linear_out,  "transformer_blocks.%d.ff_context.linear_out.weight");
-
-#undef MAKE_B1
-#undef MAKE_F32_1D
+#undef LOAD_B1
+#undef LOAD_F32_1D
     }
 
-    // ── Single blocks ──────────────────────────────────────────────
+    // Single blocks
     w.single_blocks.resize(params.depth_single_blocks);
     for (int s = 0; s < params.depth_single_blocks; s++) {
         auto & sb = w.single_blocks[s];
         char buf[256];
 
-#define MAKE_B1(field, fmt) \
+#define LOAD_B1(field, fmt) \
         snprintf(buf, sizeof(buf), fmt, s); \
-        make_b1_weight(ctx, require(st, buf), sb.field, uploads);
+        make_b1_weight(ctx_weights, require(st, buf), sb.field, uploads);
 
-#define MAKE_F32_1D(field, fmt) \
+#define LOAD_F32_1D(field, fmt) \
         snprintf(buf, sizeof(buf), fmt, s); \
         { \
-            const auto & stf = require(st, buf); \
-            sb.field.data = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, params.head_dim); \
-            uploads.push_back({sb.field.data, stf.data, (size_t)params.head_dim * sizeof(float)}); \
+            const auto & sf = require(st, buf); \
+            sb.field.data = ggml_new_tensor_1d(ctx_weights, GGML_TYPE_F32, params.head_dim); \
+            uploads.push_back({sb.field.data, sf.data, (size_t)params.head_dim * sizeof(float)}); \
         }
 
-        MAKE_B1(to_qkv_mlp_proj, "single_transformer_blocks.%d.attn.to_qkv_mlp_proj.weight");
-        MAKE_B1(to_out,          "single_transformer_blocks.%d.attn.to_out.weight");
-        MAKE_F32_1D(norm_q, "single_transformer_blocks.%d.attn.norm_q.weight");
-        MAKE_F32_1D(norm_k, "single_transformer_blocks.%d.attn.norm_k.weight");
+        LOAD_B1(to_qkv_mlp_proj, "single_transformer_blocks.%d.attn.to_qkv_mlp_proj.weight");
+        LOAD_B1(to_out,          "single_transformer_blocks.%d.attn.to_out.weight");
+        LOAD_F32_1D(norm_q, "single_transformer_blocks.%d.attn.norm_q.weight");
+        LOAD_F32_1D(norm_k, "single_transformer_blocks.%d.attn.norm_k.weight");
 
-#undef MAKE_B1
-#undef MAKE_F32_1D
+#undef LOAD_B1
+#undef LOAD_F32_1D
     }
 
-    // ── Output head (F32) ──────────────────────────────────────────
-    make_f32_weight(ctx, require(st, "norm_out.linear.weight"), w.norm_out_linear, uploads);
-    make_f32_weight(ctx, require(st, "proj_out.weight"), w.proj_out, uploads);
+    // Output head (F32)
+    make_f32_weight(ctx_weights, require(st, "norm_out.linear.weight"), w.norm_out_linear, uploads);
+    make_f32_weight(ctx_weights, require(st, "proj_out.weight"), w.proj_out, uploads);
 
-    size_t total_upload_bytes = 0;
-    for (auto & u : uploads) total_upload_bytes += u.size;
-    fprintf(stdout, "Loaded %d double_blocks + %d single_blocks weights (%zu MB to upload).\n",
-            params.depth, params.depth_single_blocks, total_upload_bytes / 1024 / 1024);
+    size_t total_upload_mb = 0;
+    for (auto & u : uploads) total_upload_mb += u.size;
+    fprintf(stdout, "Loaded %d db + %d sb weights (%zu MB).\n",
+            params.depth, params.depth_single_blocks, total_upload_mb / 1024 / 1024);
 
     // ── 3. Load text embeddings ────────────────────────────────────
     fprintf(stdout, "Loading embeddings from %s...\n", embedding_path.c_str());
@@ -218,14 +222,16 @@ int main(int argc, char ** argv) {
     fread(txt_emb.data(), 1, emb_size, ef);
     fclose(ef);
 
-    // ── 4. Build graph ─────────────────────────────────────────────
+    // ── 4. Build graph in separate compute context ──────────────────
     fprintf(stdout, "Building computation graph...\n");
+    struct ggml_init_params cparams = { 64ULL * 1024 * 1024, NULL, true };
+    ggml_context * ctx_compute = ggml_init(cparams);
 
     auto freqs_data = compute_rope_freqs_data(params.axes_dim, 4, (float)params.theta);
-    ggml_tensor * freqs_table = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, freqs_data.max_half, freqs_data.n_axes);
+    ggml_tensor * freqs_table = ggml_new_tensor_2d(ctx_compute, GGML_TYPE_F32, freqs_data.max_half, freqs_data.n_axes);
 
     DiffuserGraph dg = build_diffuser_graph(
-        ctx, params, w, freqs_table,
+        ctx_compute, params, w, freqs_table,
         img_tokens, txt_tokens, 1, n_threads,
         max_depth, max_single);
 
@@ -237,20 +243,25 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    fprintf(stdout, "Allocating GPU buffers...\n");
-    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, gpu);
+    // Allocate weight buffer on GPU, then upload weights
+    fprintf(stdout, "Allocating weight buffer on GPU...\n");
+    ggml_backend_buffer_t buf_weights = ggml_backend_alloc_ctx_tensors(ctx_weights, gpu);
+    fprintf(stdout, "Uploading %zu weight tensors...\n", uploads.size());
+    upload_all(gpu, uploads);
 
-    // Upload rope frequencies
+    // Allocate compute graph via ggml_gallocr (reuses memory like CPU path)
+    fprintf(stdout, "Allocating compute buffers (gallocr)...\n");
+    ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(gpu);
+    ggml_gallocr_t galloc = ggml_gallocr_new(buft);
+    ggml_gallocr_reserve(galloc, dg.graph);
+    ggml_gallocr_alloc_graph(galloc, dg.graph);
+    size_t alloc_mb = ggml_gallocr_get_buffer_size(galloc, 0) / 1024 / 1024;
+    fprintf(stdout, "Graph allocator reserved %zu MB for intermediate tensors\n", alloc_mb);
+
     ggml_backend_tensor_set(freqs_table, freqs_data.values.data(), 0,
                             freqs_data.values.size() * sizeof(float));
 
-    // ── 6. Upload all weight data ──────────────────────────────────
-    fprintf(stdout, "Uploading %zu tensors to GPU...\n", uploads.size());
-    for (auto & u : uploads) {
-        ggml_backend_tensor_set(u.tensor, u.data, 0, u.size);
-    }
-
-    // ── 7. Diffusion loop ──────────────────────────────────────────
+    // ── 6. Diffusion loop ──────────────────────────────────────────
     std::vector<float> latents(C * img_tokens);
 
     FILE * f_latent = fopen("tmp/x_input.bin", "rb");
@@ -278,7 +289,6 @@ int main(int argc, char ** argv) {
     for (int i = 0; i < steps; i++)
         timesteps[i] = 1.0f - (float)i / steps;
 
-    // Pre-allocate output buffer on host
     std::vector<float> noise_pred(C * img_tokens);
 
     fprintf(stdout, "Starting diffusion with %d steps on %d x %d grid...\n", steps, im_H, im_W);
@@ -315,15 +325,17 @@ int main(int argc, char ** argv) {
             latents[i] = latents[i] + dt * noise_pred[i];
     }
 
-    // ── 8. Save final latents ──────────────────────────────────────
+    // ── 7. Save final latents ──────────────────────────────────────
     std::string out_path = "latents_final.bin";
     FILE * of = fopen(out_path.c_str(), "wb");
     if (of) { fwrite(latents.data(), sizeof(float), latents.size(), of); fclose(of); }
     fprintf(stdout, "Saved latents to %s\n", out_path.c_str());
 
-    ggml_backend_buffer_free(buf);
+    ggml_gallocr_free(galloc);
+    ggml_backend_buffer_free(buf_weights);
     ggml_backend_free(gpu);
-    ggml_free(ctx);
+    ggml_free(ctx_compute);
+    ggml_free(ctx_weights);
 
     return 0;
 }
