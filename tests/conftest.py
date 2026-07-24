@@ -21,8 +21,12 @@ def pytest_addoption(parser):
                      help="Path to the full-precision safetensors (reference)")
     parser.addoption("--diffuser-gguf", action="store", default=None,
                      help="Path to the B1_0 quantized GGUF")
+    parser.addoption("--backend", action="store", default="cpu", choices=["cpu", "gpu"],
+                     help="Backend: cpu or gpu")
     parser.addoption("--diffuser-binary", action="store", default=None,
                      help="Path to the bonsai_diffuser binary")
+    parser.addoption("--diffuser-webgpu-binary", action="store", default=None,
+                     help="Path to the bonsai_diffuser_webgpu binary")
 
 
 @pytest.fixture
@@ -118,8 +122,32 @@ def diffuser_binary(request) -> Path:
     default = PROJECT_ROOT / "build" / "bonsai_diffuser"
     if default.exists():
         return default
+    # Windows fallback
+    default_win = PROJECT_ROOT / "build" / "Release" / "bonsai_diffuser.exe"
+    if default_win.exists():
+        return default_win
     pytest.skip(f"Diffuser binary not found at {default}. "
                 f"Build it first or provide a path with --diffuser-binary <path>")
+
+
+@pytest.fixture
+def diffuser_webgpu_binary(request) -> Path:
+    path = request.config.getoption("--diffuser-webgpu-binary")
+    if path:
+        return Path(path).resolve()
+    candidates = [
+        PROJECT_ROOT / "build" / "Release" / "bonsai_diffuser_webgpu.exe",
+        PROJECT_ROOT / "build" / "bonsai_diffuser_webgpu",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
+@pytest.fixture
+def backend(request) -> str:
+    return request.config.getoption("--backend")
 
 
 @pytest.fixture

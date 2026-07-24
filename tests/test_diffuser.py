@@ -193,3 +193,76 @@ def test_diffuser_matches_hf(
 
         assert sim >= 0.70, \
             f"C vs HF B1_0 cosine {sim:.6f} < 0.70 — probable bug de graphe"
+
+
+@pytest.mark.diffuser
+def test_diffuser_gpu_vs_hf(
+    diffuser_packed: Path,
+    diffuser_webgpu_binary: Path,
+):
+    """GPU B1_0 vs HF reference. Cos > 0.70 attendu."""
+    if diffuser_webgpu_binary is None:
+        pytest.skip("bonsai_diffuser_webgpu not found. Build with WebGPU first.")
+
+    params = DiffuserParams()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using HF device: {device}", flush=True)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+
+        # ── 1. Generate synthetic inputs ──────────────────────────────
+        print("Generating synthetic inputs...", flush=True)
+        inputs = generate_synthetic_input(params, seed=42)
+
+        c_tmp = tmp / "tmp"
+        c_tmp.mkdir(exist_ok=True)
+        x_input_path = c_tmp / "x_input.bin"
+        lat_c = inputs["latents"][0].contiguous().float()
+        lat_c.numpy().tofile(x_input_path)
+        print(f"  x_input.bin: {list(lat_c.shape)}", flush=True)
+
+        emb_path = tmp / "embeddings.bin"
+        emb_c = inputs["embeddings"][0].contiguous().float()
+        emb_c.numpy().tofile(emb_path)
+        print(f"  embeddings.bin: {list(emb_c.shape)}", flush=True)
+
+        # ── 2. Run GPU binary (B1_0 packed safetensors) ───────────────
+        print("Running GPU binary (B1_0 packed model)...", flush=True)
+        np_gpu = run_c_binary(diffuser_webgpu_binary, diffuser_packed, emb_path, tmp)
+        print(f"  GPU noise_pred: μ={np_gpu.mean():.4f} σ={np_gpu.std():.4f} "
+              f"min={np_gpu.min():.4f} max={np_gpu.max():.4f}", flush=True)
+
+        # ── 3. HF reference from packed safetensors ───────────────────
+        t0 = time.time()
+        print("\n--- HF reference (dequantized B1_0 from packed safetensors) ---", flush=True)
+        model = load_hf_model_from_packed(str(diffuser_packed), params, device)
+        print(f"  Model loaded in {time.time() - t0:.1f}s", flush=True)
+
+        t1 = time.time()
+        np_hf = noise_pred_c_format(model, inputs, device).cpu().numpy()
+        print(f"  HF forward: {time.time() - t1:.1f}s", flush=True)
+        print(f"  stats: μ={np_hf.mean():.6f} σ={np_hf.std():.6f} "
+              f"min={np_hf.min():.6f} max={np_hf.max():.6f}", flush=True)
+
+        # ── 4. Comparison ─────────────────────────────────────────────
+        print(f"\n{'='*60}", flush=True)
+        sim = cosine_similarity(np_hf, np_gpu)
+        print(f"  Cosine similarity:       {sim:.6f}", flush=True)
+
+        mse = float(np.mean((np_hf - np_gpu) ** 2))
+        max_val = float(max(np_hf.max(), np_gpu.max()) - min(np_hf.min(), np_gpu.min()))
+        psnr = float(20.0 * np.log10(max_val / np.sqrt(mse))) if mse > 0 else float("inf")
+        print(f"  MSE:                     {mse:.6f}", flush=True)
+        print(f"  PSNR (dynamic range):    {psnr:.2f} dB", flush=True)
+
+        sign_agree = float(np.mean(np.sign(np_hf) == np.sign(np_gpu)))
+        print(f"  Sign agreement:          {sign_agree*100:.2f}%", flush=True)
+
+        diff = np_hf - np_gpu
+        print(f"  Diff μ={diff.mean():.6f} σ={diff.std():.6f} "
+              f"|σ_diff|/|σ_hf|={diff.std()/np_hf.std():.3f}", flush=True)
+        print(f"{'='*60}", flush=True)
+
+        assert sim >= 0.70, \
+            f"GPU vs HF B1_0 cosine {sim:.6f} < 0.70 — probable bug de graphe"
