@@ -63,17 +63,10 @@ static void make_b1_weight(
     uploads.push_back({out.data, st.data, nbytes});
 }
 
-template <typename ST>
-static const SafeTensorWin & require(const ST & st, const char * name) {
+static const SafeTensorWin & require(const SafetensorsFileWin & st, const char * name) {
     auto * p = st.find(name);
     if (!p) { fprintf(stderr, "FATAL: weight '%s' not found\n", name); abort(); }
     return *p;
-}
-
-static void upload_all(ggml_backend_t gpu, const std::vector<DeferredUpload> & uploads) {
-    for (auto & u : uploads) {
-        ggml_backend_tensor_set(u.tensor, u.data, 0, u.size);
-    }
 }
 
 int main(int argc, char ** argv) {
@@ -114,27 +107,27 @@ int main(int argc, char ** argv) {
     int img_tokens = im_H * im_W;
     int txt_tokens = 512;
 
-    // ── 2. Load weight tensors into a dedicated context ────────────
-    struct ggml_init_params wparams = { 64ULL * 1024 * 1024, NULL, true };
-    ggml_context * ctx_weights = ggml_init(wparams);
+    // ── 2. Create SINGLE ggml context for weights + graph ─────────
+    struct ggml_init_params gparams = { 256ULL * 1024 * 1024, NULL, true };
+    ggml_context * ctx = ggml_init(gparams);
 
     std::vector<DeferredUpload> uploads;
     DiffuserWeights w;
 
     // Edge projections (F32)
-    make_f32_weight(ctx_weights, require(st, "x_embedder.weight"), w.img_in, uploads);
-    make_f32_weight(ctx_weights, require(st, "context_embedder.weight"), w.txt_in, uploads);
+    make_f32_weight(ctx, require(st, "x_embedder.weight"), w.img_in, uploads);
+    make_f32_weight(ctx, require(st, "context_embedder.weight"), w.txt_in, uploads);
 
     // Time guidance (F32)
-    make_f32_weight(ctx_weights, require(st, "time_guidance_embed.timestep_embedder.linear_1.weight"), w.time_in_w1, uploads);
+    make_f32_weight(ctx, require(st, "time_guidance_embed.timestep_embedder.linear_1.weight"), w.time_in_w1, uploads);
     w.time_in_b1.data = nullptr;
-    make_f32_weight(ctx_weights, require(st, "time_guidance_embed.timestep_embedder.linear_2.weight"), w.time_in_w2, uploads);
+    make_f32_weight(ctx, require(st, "time_guidance_embed.timestep_embedder.linear_2.weight"), w.time_in_w2, uploads);
     w.time_in_b2.data = nullptr;
 
     // Modulations (F32)
-    make_f32_weight(ctx_weights, require(st, "double_stream_modulation_img.linear.weight"), w.double_mod_img, uploads);
-    make_f32_weight(ctx_weights, require(st, "double_stream_modulation_txt.linear.weight"), w.double_mod_txt, uploads);
-    make_f32_weight(ctx_weights, require(st, "single_stream_modulation.linear.weight"), w.single_mod, uploads);
+    make_f32_weight(ctx, require(st, "double_stream_modulation_img.linear.weight"), w.double_mod_img, uploads);
+    make_f32_weight(ctx, require(st, "double_stream_modulation_txt.linear.weight"), w.double_mod_txt, uploads);
+    make_f32_weight(ctx, require(st, "single_stream_modulation.linear.weight"), w.single_mod, uploads);
 
     // Double blocks
     w.double_blocks.resize(params.depth);
@@ -144,13 +137,13 @@ int main(int argc, char ** argv) {
 
 #define LOAD_B1(field, fmt) \
         snprintf(buf, sizeof(buf), fmt, d); \
-        make_b1_weight(ctx_weights, require(st, buf), db.field, uploads);
+        make_b1_weight(ctx, require(st, buf), db.field, uploads);
 
 #define LOAD_F32_1D(field, fmt) \
         snprintf(buf, sizeof(buf), fmt, d); \
         { \
             const auto & s = require(st, buf); \
-            db.field.data = ggml_new_tensor_1d(ctx_weights, GGML_TYPE_F32, params.head_dim); \
+            db.field.data = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, params.head_dim); \
             uploads.push_back({db.field.data, s.data, (size_t)params.head_dim * sizeof(float)}); \
         }
 
@@ -183,13 +176,13 @@ int main(int argc, char ** argv) {
 
 #define LOAD_B1(field, fmt) \
         snprintf(buf, sizeof(buf), fmt, s); \
-        make_b1_weight(ctx_weights, require(st, buf), sb.field, uploads);
+        make_b1_weight(ctx, require(st, buf), sb.field, uploads);
 
 #define LOAD_F32_1D(field, fmt) \
         snprintf(buf, sizeof(buf), fmt, s); \
         { \
             const auto & sf = require(st, buf); \
-            sb.field.data = ggml_new_tensor_1d(ctx_weights, GGML_TYPE_F32, params.head_dim); \
+            sb.field.data = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, params.head_dim); \
             uploads.push_back({sb.field.data, sf.data, (size_t)params.head_dim * sizeof(float)}); \
         }
 
@@ -203,8 +196,8 @@ int main(int argc, char ** argv) {
     }
 
     // Output head (F32)
-    make_f32_weight(ctx_weights, require(st, "norm_out.linear.weight"), w.norm_out_linear, uploads);
-    make_f32_weight(ctx_weights, require(st, "proj_out.weight"), w.proj_out, uploads);
+    make_f32_weight(ctx, require(st, "norm_out.linear.weight"), w.norm_out_linear, uploads);
+    make_f32_weight(ctx, require(st, "proj_out.weight"), w.proj_out, uploads);
 
     size_t total_upload_mb = 0;
     for (auto & u : uploads) total_upload_mb += u.size;
@@ -222,16 +215,14 @@ int main(int argc, char ** argv) {
     fread(txt_emb.data(), 1, emb_size, ef);
     fclose(ef);
 
-    // ── 4. Build graph in separate compute context ──────────────────
+    // ── 4. Build graph in SAME context ─────────────────────────────
     fprintf(stdout, "Building computation graph...\n");
-    struct ggml_init_params cparams = { 64ULL * 1024 * 1024, NULL, true };
-    ggml_context * ctx_compute = ggml_init(cparams);
 
     auto freqs_data = compute_rope_freqs_data(params.axes_dim, 4, (float)params.theta);
-    ggml_tensor * freqs_table = ggml_new_tensor_2d(ctx_compute, GGML_TYPE_F32, freqs_data.max_half, freqs_data.n_axes);
+    ggml_tensor * freqs_table = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, freqs_data.max_half, freqs_data.n_axes);
 
     DiffuserGraph dg = build_diffuser_graph(
-        ctx_compute, params, w, freqs_table,
+        ctx, params, w, freqs_table,
         img_tokens, txt_tokens, 1, n_threads,
         max_depth, max_single);
 
@@ -243,25 +234,26 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    // Allocate weight buffer on GPU, then upload weights
-    fprintf(stdout, "Allocating weight buffer on GPU...\n");
-    ggml_backend_buffer_t buf_weights = ggml_backend_alloc_ctx_tensors(ctx_weights, gpu);
-    fprintf(stdout, "Uploading %zu weight tensors...\n", uploads.size());
-    upload_all(gpu, uploads);
-
-    // Allocate compute graph via ggml_gallocr (reuses memory like CPU path)
-    fprintf(stdout, "Allocating compute buffers (gallocr)...\n");
+    // ── 6. Single ggml_gallocr for ALL tensors (weights + compute) ─
+    fprintf(stdout, "Allocating graph (gallocr, all tensors in one buffer)...\n");
     ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(gpu);
     ggml_gallocr_t galloc = ggml_gallocr_new(buft);
     ggml_gallocr_reserve(galloc, dg.graph);
     ggml_gallocr_alloc_graph(galloc, dg.graph);
     size_t alloc_mb = ggml_gallocr_get_buffer_size(galloc, 0) / 1024 / 1024;
-    fprintf(stdout, "Graph allocator reserved %zu MB for intermediate tensors\n", alloc_mb);
+    fprintf(stdout, "Graph allocator reserved %zu MB total\n", alloc_mb);
 
+    // Upload weights
+    fprintf(stdout, "Uploading %zu weight tensors...\n", uploads.size());
+    for (auto & u : uploads) {
+        ggml_backend_tensor_set(u.tensor, u.data, 0, u.size);
+    }
+
+    // Upload rope frequencies
     ggml_backend_tensor_set(freqs_table, freqs_data.values.data(), 0,
                             freqs_data.values.size() * sizeof(float));
 
-    // ── 6. Diffusion loop ──────────────────────────────────────────
+    // ── 7. Diffusion loop ──────────────────────────────────────────
     std::vector<float> latents(C * img_tokens);
 
     FILE * f_latent = fopen("tmp/x_input.bin", "rb");
@@ -325,17 +317,15 @@ int main(int argc, char ** argv) {
             latents[i] = latents[i] + dt * noise_pred[i];
     }
 
-    // ── 7. Save final latents ──────────────────────────────────────
+    // ── 8. Save final latents ──────────────────────────────────────
     std::string out_path = "latents_final.bin";
     FILE * of = fopen(out_path.c_str(), "wb");
     if (of) { fwrite(latents.data(), sizeof(float), latents.size(), of); fclose(of); }
     fprintf(stdout, "Saved latents to %s\n", out_path.c_str());
 
     ggml_gallocr_free(galloc);
-    ggml_backend_buffer_free(buf_weights);
     ggml_backend_free(gpu);
-    ggml_free(ctx_compute);
-    ggml_free(ctx_weights);
+    ggml_free(ctx);
 
     return 0;
 }
