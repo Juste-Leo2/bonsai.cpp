@@ -15,7 +15,7 @@
 #include "diffuser_types.h"
 #include "diffuser_graph.h"
 #include "b1_0_kernel.h"
-#include "safetensors_win.h"
+#include "safetensors.h"
 
 using namespace bonsai;
 
@@ -31,7 +31,7 @@ struct DeferredUpload {
 
 static void make_f32_weight(
     ggml_context * ctx,
-    const SafeTensorWin & st,
+    const SafeTensor & st,
     FPWeights & out,
     std::vector<DeferredUpload> & uploads)
 {
@@ -48,7 +48,7 @@ static void make_f32_weight(
 
 static void make_b1_weight(
     ggml_context * ctx,
-    const SafeTensorWin & st,
+    const SafeTensor & st,
     B1Weights & out,
     std::vector<DeferredUpload> & uploads)
 {
@@ -63,7 +63,7 @@ static void make_b1_weight(
     uploads.push_back({out.data, st.data, nbytes});
 }
 
-static const SafeTensorWin & require(const SafetensorsFileWin & st, const char * name) {
+static const SafeTensor & require(const SafetensorsFile & st, const char * name) {
     auto * p = st.find(name);
     if (!p) { fprintf(stderr, "FATAL: weight '%s' not found\n", name); abort(); }
     return *p;
@@ -97,7 +97,7 @@ int main(int argc, char ** argv) {
 
     // ── 1. Open safetensors ────────────────────────────────────────
     fprintf(stdout, "Loading model from %s...\n", model_path.c_str());
-    SafetensorsFileWin st;
+    SafetensorsFile st;
     st.open(model_path);
 
     DiffuserParams params;
@@ -243,11 +243,17 @@ int main(int argc, char ** argv) {
     size_t alloc_mb = ggml_gallocr_get_buffer_size(galloc, 0) / 1024 / 1024;
     fprintf(stdout, "Graph allocator reserved %zu MB total\n", alloc_mb);
 
-    // Upload weights
+    // Upload weights (skip tensors not in reduced graph, e.g. --max-depth)
     fprintf(stdout, "Uploading %zu weight tensors...\n", uploads.size());
+    size_t uploaded = 0;
     for (auto & u : uploads) {
-        ggml_backend_tensor_set(u.tensor, u.data, 0, u.size);
+        if (u.tensor->buffer) {
+            ggml_backend_tensor_set(u.tensor, u.data, 0, u.size);
+            uploaded++;
+        }
     }
+    fprintf(stdout, "  %zu/%zu tensors uploaded (skipped %zu not in graph)\n",
+            uploaded, uploads.size(), uploads.size() - uploaded);
 
     // Upload rope frequencies
     ggml_backend_tensor_set(freqs_table, freqs_data.values.data(), 0,

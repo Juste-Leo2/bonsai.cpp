@@ -28,6 +28,21 @@ static float cosine(const float *a, const float *b, int n) {
     return (float)(dot / (sqrt(fmax(na, 1e-30)) * sqrt(fmax(nb, 1e-30))));
 }
 
+static void print_stats(const char *label, const float *v, int n) {
+    double sum = 0, sum2 = 0;
+    float vmin = v[0], vmax = v[0];
+    for (int i = 0; i < n; i++) {
+        sum += v[i];
+        sum2 += (double)v[i] * v[i];
+        if (v[i] < vmin) vmin = v[i];
+        if (v[i] > vmax) vmax = v[i];
+    }
+    float mean = (float)(sum / n);
+    float std  = (float)sqrt(sum2 / n - mean * mean);
+    fprintf(stdout, "  %s mu=%.4f std=%.4f min=%.4f max=%.4f\n", label, mean, std, vmin, vmax);
+    fflush(stdout);
+}
+
 static std::vector<uint8_t> pack_b1(const float *wgt, int out_dim, int in_dim) {
     int nb = in_dim / 32, rs = nb * 6;
     std::vector<uint8_t> out(out_dim * rs);
@@ -108,6 +123,10 @@ static bool test_input_proj(ggml_backend_t cpu, ggml_backend_t gpu) {
 
     auto [hi_c, ht_c] = run(cpu);
     auto [hi_g, ht_g] = run(gpu);
+    print_stats("CPU img", hi_c.data(), n_h_img);
+    print_stats("GPU img", hi_g.data(), n_h_img);
+    print_stats("CPU txt", ht_c.data(), n_h_txt);
+    print_stats("GPU txt", ht_g.data(), n_h_txt);
     float ci = cosine(hi_c.data(), hi_g.data(), n_h_img);
     float ct = cosine(ht_c.data(), ht_g.data(), n_h_txt);
     fprintf(stdout, "  cos_h_img=%.6f cos_h_txt=%.6f %s\n", ci, ct, (ci>0.9999f&&ct>0.9999f)?"PASS":"FAIL");
@@ -153,6 +172,8 @@ static bool test_output_head(ggml_backend_t cpu, ggml_backend_t gpu) {
 
     auto c = run(cpu);
     auto g = run(gpu);
+    print_stats("CPU", c.data(), n_out);
+    print_stats("GPU", g.data(), n_out);
     float cs = cosine(c.data(), g.data(), n_out);
     fprintf(stdout, "  cos=%.6f %s\n", cs, cs>0.9999f?"PASS":"FAIL");
     return cs > 0.9999f;
@@ -224,6 +245,8 @@ static bool test_timestep(ggml_backend_t cpu, ggml_backend_t gpu) {
 
     auto c = run(cpu);
     auto g = run(gpu);
+    print_stats("CPU", c.data(), n_mod);
+    print_stats("GPU", g.data(), n_mod);
     float cs = cosine(c.data(), g.data(), n_mod);
     fprintf(stdout, "  cos=%.6f %s\n", cs, cs>0.9999f?"PASS":"FAIL");
     return cs > 0.9999f;
@@ -336,6 +359,8 @@ static bool test_single_block(ggml_backend_t cpu, ggml_backend_t gpu) {
 
     auto c = run(cpu);
     auto g = run(gpu);
+    print_stats("CPU", c.data(), H * total_t);
+    print_stats("GPU", g.data(), H * total_t);
     float cs = cosine(c.data(), g.data(), H * total_t);
     fprintf(stdout, "  cos=%.6f %s\n", cs, cs>0.9999f?"PASS":"FAIL");
     return cs > 0.9999f;
@@ -494,6 +519,10 @@ static bool test_double_block(ggml_backend_t cpu, ggml_backend_t gpu) {
 
     auto [ic,tc] = run(cpu);
     auto [ig,tg] = run(gpu);
+    print_stats("CPU img", ic.data(), H*it);
+    print_stats("GPU img", ig.data(), H*it);
+    print_stats("CPU txt", tc.data(), H*tt);
+    print_stats("GPU txt", tg.data(), H*tt);
     float ci=cosine(ic.data(),ig.data(),H*it), ct=cosine(tc.data(),tg.data(),H*tt);
     fprintf(stdout,"  cos_img=%.6f cos_txt=%.6f %s\n",ci,ct,(ci>0.9999f&&ct>0.9999f)?"PASS":"FAIL");
     return ci>0.9999f && ct>0.9999f;

@@ -266,3 +266,97 @@ def test_diffuser_gpu_vs_hf(
 
         assert sim >= 0.70, \
             f"GPU vs HF B1_0 cosine {sim:.6f} < 0.70 — probable bug de graphe"
+
+
+@pytest.mark.diffuser
+def test_diffuser_cpu_vs_gpu(
+    diffuser_packed: Path,
+    diffuser_binary: Path,
+    diffuser_webgpu_binary: Path,
+):
+    """1-step CPU vs GPU: compare noise_pred mu, std, cos to find GPU-specific scaling."""
+    if diffuser_webgpu_binary is None:
+        pytest.skip("bonsai_diffuser_webgpu not found. Build with WebGPU first.")
+
+    params = DiffuserParams()
+
+    # ── Generate synthetic inputs once ───────────────────────────
+    print("Generating synthetic inputs...", flush=True)
+    inputs = generate_synthetic_input(params, seed=42)
+    lat_c = inputs["latents"][0].contiguous().float()
+    emb_c = inputs["embeddings"][0].contiguous().float()
+
+    def run_one(binary, label, extra_args=None):
+        if extra_args is None:
+            extra_args = []
+        tmpdir = tempfile.TemporaryDirectory()
+        tmp = Path(tmpdir.name)
+        c_tmp = tmp / "tmp"
+        c_tmp.mkdir(exist_ok=True)
+        lat_c.numpy().tofile(c_tmp / "x_input.bin")
+        emb_path = tmp / "embeddings.bin"
+        emb_c.numpy().tofile(emb_path)
+
+        print(f"  Running {label} binary...", flush=True)
+        t0 = time.time()
+        result = subprocess.run(
+            [
+                str(binary),
+                "--model", str(diffuser_packed),
+                "--embedding", str(emb_path),
+                "-h", "64", "-w", "64",
+                "--steps", "1", "--threads", "8",
+            ] + extra_args,
+            cwd=tmp,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        elapsed = time.time() - t0
+        if result.returncode != 0:
+            stderr = result.stderr.decode(errors="replace")
+            stdout = result.stdout.decode(errors="replace")
+            raise RuntimeError(f"{label} exit {result.returncode}\nSTDERR:\n{stderr}\nSTDOUT:\n{stdout}")
+        for line in result.stdout.decode(errors="replace").splitlines():
+            print(f"    [{label}] {line}", flush=True)
+
+        lat_final = np.fromfile(tmp / "latents_final.bin", dtype=np.float32)
+        lat_initial = np.fromfile(c_tmp / "x_input.bin", dtype=np.float32)
+        npred = (lat_final - lat_initial).reshape(4096, 128).copy()
+        print(f"  {label}: {elapsed:.1f}s", flush=True)
+        return npred
+
+    # Reduced depth for CPU speed (both binaries get same config)
+    np_cpu = run_one(diffuser_binary, "CPU", extra_args=["--max-depth", "2", "--max-single", "1"])
+    np_gpu = run_one(diffuser_webgpu_binary, "GPU", extra_args=["--max-depth", "2", "--max-single", "1"])
+
+    # ── Stats ────────────────────────────────────────────────────
+    print(f"\n{'='*60}", flush=True)
+
+    def stats(a, label):
+        a = a.ravel().astype(np.float64)
+        mu = float(np.mean(a))
+        std = float(np.std(a))
+        vmin = float(np.min(a))
+        vmax = float(np.max(a))
+        print(f"  {label:5s} mu={mu: .4f} std={std:.4f} min={vmin: .4f} max={vmax: .4f}",
+              flush=True)
+        return mu, std, vmin, vmax
+
+    cpu_mu, cpu_std, cpu_min, cpu_max = stats(np_cpu, "CPU")
+    gpu_mu, gpu_std, gpu_min, gpu_max = stats(np_gpu, "GPU")
+
+    diff = np_gpu.ravel().astype(np.float64) - np_cpu.ravel().astype(np.float64)
+    max_abs_diff = float(np.max(np.abs(diff)))
+    print(f"  max|GPU-CPU| = {max_abs_diff:.6f}", flush=True)
+
+    ratio = gpu_std / cpu_std if cpu_std > 1e-9 else 0.0
+    print(f"  GPU_std/CPU_std = {ratio:.4f}", flush=True)
+
+    cos = cosine_similarity(np_gpu, np_cpu)
+    print(f"  Cosine(GPU,CPU) = {cos:.6f}", flush=True)
+
+    print(f"{'='*60}", flush=True)
+
+    assert cos >= 0.9999, \
+        f"CPU vs GPU cosine {cos:.6f} < 0.9999 — GPU-specific divergence! " \
+        f"ratio={ratio:.4f} max_abs_diff={max_abs_diff:.6f}"

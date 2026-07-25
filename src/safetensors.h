@@ -2,16 +2,21 @@
 
 #include <cstdint>
 #include <cstring>
-#include <fcntl.h>
 #include <fstream>
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
+#include <vector>
+
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <unordered_map>
 #include <unistd.h>
-#include <vector>
+#endif
 
 namespace bonsai {
 
@@ -27,20 +32,43 @@ struct SafeTensor {
 class SafetensorsFile {
 public:
     SafetensorsFile() = default;
+
     ~SafetensorsFile() {
+#ifdef _WIN32
+        // vector dtor handles cleanup
+#else
         if (mapped_) {
             munmap(mapped_, file_size_);
+            mapped_ = nullptr;
         }
+        if (fd_ >= 0) {
+            ::close(fd_);
+            fd_ = -1;
+        }
+#endif
     }
 
     SafetensorsFile(const SafetensorsFile &) = delete;
     SafetensorsFile & operator=(const SafetensorsFile &) = delete;
 
     void open(const std::string & path) {
+#ifdef _WIN32
+        // ── Windows: read entire file into memory ─────────────────
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        if (!f) throw std::runtime_error("failed to open: " + path);
+        file_size_ = static_cast<size_t>(f.tellg());
+        f.seekg(0);
+        file_data_.resize(file_size_);
+        f.read(reinterpret_cast<char *>(file_data_.data()), file_size_);
+        f.close();
+
+        if (file_size_ < 8) throw std::runtime_error("file too small");
+
+        const uint8_t * mapped_ = file_data_.data();
+#else
+        // ── POSIX: mmap the file ──────────────────────────────────
         fd_ = ::open(path.c_str(), O_RDONLY);
-        if (fd_ < 0) {
-            throw std::runtime_error("failed to open: " + path);
-        }
+        if (fd_ < 0) throw std::runtime_error("failed to open: " + path);
 
         struct stat st;
         if (fstat(fd_, &st) != 0) {
@@ -57,18 +85,17 @@ public:
             fd_ = -1;
             throw std::runtime_error("failed to mmap: " + path);
         }
+#endif
 
-        if (file_size_ < 8) {
-            throw std::runtime_error("file too small");
-        }
+        // ── Parse header (common to both paths) ───────────────────
+        if (file_size_ < 8) throw std::runtime_error("file too small");
 
         uint64_t header_len = 0;
         std::memcpy(&header_len, mapped_, 8);
-        if (header_len == 0 || header_len + 8 > file_size_) {
+        if (header_len == 0 || header_len + 8 > file_size_)
             throw std::runtime_error("invalid header length");
-        }
 
-        data_start_ = 8 + header_len;  // MUST be set before parse_header reads it
+        data_start_ = 8 + header_len;
 
         const char * json_begin = reinterpret_cast<const char *>(mapped_ + 8);
         std::string header(json_begin, json_begin + header_len);
@@ -149,6 +176,11 @@ private:
                 if (pair.size() != 2) throw std::runtime_error("data_offsets must be [a, b]");
                 t.begin = static_cast<uint64_t>(pair[0]);
                 t.end   = static_cast<uint64_t>(pair[1]);
+#ifdef _WIN32
+                t.data = file_data_.data() + data_start_ + static_cast<size_t>(pair[0]);
+#else
+                t.data = mapped_ + data_start_ + t.begin;
+#endif
             } else {
                 skip_value(json, pos);
             }
@@ -159,7 +191,6 @@ private:
         ++pos;
 
         if (!is_metadata) {
-            t.data = mapped_ + data_start_ + t.begin;
             tensors_.emplace(key, std::move(t));
         }
     }
@@ -231,8 +262,13 @@ private:
         } while (pos < json.size());
     }
 
+#ifdef _WIN32
+    std::vector<uint8_t> file_data_;
+    // mapped_ alias in open() local scope
+#else
     int fd_ = -1;
     uint8_t * mapped_ = nullptr;
+#endif
     size_t file_size_ = 0;
     size_t data_start_ = 0;
     std::unordered_map<std::string, SafeTensor> tensors_;

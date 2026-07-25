@@ -12,7 +12,6 @@
 #include <iostream>
 #include <sstream>
 #include <string>
-#include <sys/mman.h>
 #include <unordered_map>
 #include <vector>
 
@@ -431,6 +430,14 @@ int main(int argc, char ** argv) {
 
     // --- Build activations context ---
     size_t actx_size = 16ULL * 1024 * 1024 * 1024;
+#ifdef _WIN32
+    void * actx_buf = malloc(actx_size);
+    if (!actx_buf) {
+        log_err("failed to malloc activations context");
+        ggml_free(wctx);
+        return 1;
+    }
+#else
     void * actx_buf = mmap(nullptr, actx_size, PROT_READ | PROT_WRITE,
                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (actx_buf == MAP_FAILED) {
@@ -438,11 +445,16 @@ int main(int argc, char ** argv) {
         ggml_free(wctx);
         return 1;
     }
+#endif
     ggml_init_params aparams{ actx_size, actx_buf, false };
     ggml_context * actx = ggml_init(aparams);
     if (!actx) {
         log_err("failed to allocate activations context");
+#ifdef _WIN32
+        free(actx_buf);
+#else
         munmap(actx_buf, actx_size);
+#endif
         ggml_free(wctx);
         return 1;
     }
@@ -513,7 +525,11 @@ int main(int argc, char ** argv) {
         log_err("expected 3 output channels");
         ggml_free(actx);
         ggml_free(wctx);
+#ifdef _WIN32
+        free(actx_buf);
+#else
         munmap(actx_buf, actx_size);
+#endif
         return 1;
     }
 
@@ -541,7 +557,11 @@ int main(int argc, char ** argv) {
 
     ggml_free(actx);
     ggml_free(wctx);
+#ifdef _WIN32
+    free(actx_buf);
+#else
     munmap(actx_buf, actx_size);
+#endif
     log_info("cleanup done. bye.");
     return 0;
 }
