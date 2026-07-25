@@ -15,22 +15,22 @@
      ▼               ▼                  ▼                ▼
 ┌──────────┐   ┌────────────┐     ┌──────────┐     ┌─────────┐
 │ Encoder  │──▶│  Diffuser  │────▶│   VAE    │────▶│  Image  │
-│(llama.cpp│   │ (ggml CPU) │     │ (ggml)   │     │  (PNG)  │
+│(llama.cpp│   │  (WebGPU)  │     │ (ggml)   │     │  (PNG)  │
 │   CPU)   │   │   [1-bit]  │     │   CPU    │     │         │
 └──────────┘   └────────────┘     └──────────┘     └─────────┘
 ```
 
 ## Status
 
-| Component | Status | Math Verified | Vulkan Opt. | Build |
+| Component | Status | Math Verified | WebGPU | Build |
 |---|---|---|---|---|
 | **Encoder** | ✅ Impl. | ✅ ([test.md](test.md)) | — | `--target bonsai_encoder` |
-| **Diffuser** | ✅ Impl. | ❌ TBD | ❌ | `--target bonsai_diffuser` |
+| **Diffuser** | ✅ Impl. | ✅ CPU 69% / GPU 88% cos | ✅ RTX 4070 Ti | `--target bonsai_diffuser[_webgpu]` |
 | **VAE** | ✅ Impl. | ✅ ([test.md](test.md)) | ❌ | `--target bonsai_vae` |
 
-- **Encoder** — wraps `llama.cpp` to produce text embeddings. No Vulkan optimization planned; llama.cpp is already efficient on CPU.
-- **Diffuser** — custom GGUF-based engine with 1-bit quantized DiT tensors. Implemented but not yet mathematically verified.
-- **VAE** — decodes latents into PNGs. Mathematically verified against a PyTorch reference (see [test.md](test.md)). Vulkan acceleration not yet implemented.
+- **Encoder** — wraps `llama.cpp` to produce text embeddings. CPU-only.
+- **Diffuser** — custom 1-bit quantized Flux diffusion engine. Cosine similarity vs PyTorch reference: **69% (CPU AVX2), 88% (WebGPU/Vulkan on RTX 4070 Ti)**.
+- **VAE** — decodes latents into PNGs. Mathematically verified against PyTorch reference. WebGPU acceleration planned.
 
 Build instructions for each target are in [build.md](build.md).
 

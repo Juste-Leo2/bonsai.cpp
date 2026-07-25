@@ -86,7 +86,7 @@ int main(int argc, char **argv) {
 
     std::vector<B1LinearUserData> b1_ud; b1_ud.reserve(4);
     std::vector<Rope2DUserData> rod; rod.reserve(2);
-    auto b1=[&](ggml_tensor *a,B1Weights &w){b1_ud.push_back({w.in_dim,w.out_dim});return b1_linear(ctx,a,w,n_threads,b1_ud.back());};
+    auto b1=[&](ggml_tensor *a,B1Weights &w){b1_ud.push_back({0x31423142,w.in_dim,w.out_dim});return b1_linear(ctx,a,w,n_threads,b1_ud.back());};
 
     // ── Build single block ──
     ggml_tensor *one_t=ggml_new_tensor_1d(ctx,GGML_TYPE_F32,1);
@@ -115,8 +115,8 @@ int main(int argc, char **argv) {
 
     // RoPE
     ggml_tensor *qr=nullptr,*kr=nullptr;
-    rod.push_back({head_dim,n_heads,total_t}); qr=rope_2d_fwd(ctx,qkv.q,cos_c,sin_c,rod.back());
-    rod.push_back({head_dim,n_heads,total_t}); kr=rope_2d_fwd(ctx,qkv.k,cos_c,sin_c,rod.back());
+    rod.push_back({0x524F5045,head_dim,n_heads,total_t}); qr=rope_2d_fwd(ctx,qkv.q,cos_c,sin_c,rod.back());
+    rod.push_back({0x524F5045,head_dim,n_heads,total_t}); kr=rope_2d_fwd(ctx,qkv.k,cos_c,sin_c,rod.back());
     qkv.q=qr; qkv.k=kr;
 
     // Attention

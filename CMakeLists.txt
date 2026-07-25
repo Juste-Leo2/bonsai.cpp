@@ -72,6 +72,22 @@ target_include_directories(bonsai_diffuser PRIVATE
 
 install(TARGETS bonsai_diffuser RUNTIME DESTINATION bin)
 
+# --- bonsai_diffuser_webgpu: WebGPU backend for Flux diffusion ---
+add_executable(bonsai_diffuser_webgpu
+    src/diffuser_webgpu.cpp
+    src/diffuser_graph.cpp
+)
+
+target_link_libraries(bonsai_diffuser_webgpu PRIVATE ggml ggml-cpu ggml-webgpu)
+target_include_directories(bonsai_diffuser_webgpu PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+install(TARGETS bonsai_diffuser_webgpu RUNTIME DESTINATION bin)
+
 # --- Tests unitaires des opérations diffuser ---
 # Test b1_linear: multiplication matricielle quantifiée B1_0
 add_executable(test_b1_linear
@@ -154,5 +170,46 @@ target_link_libraries(test_output_head PRIVATE ggml ggml-cpu)
 target_include_directories(test_output_head PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
     ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
+install(TARGETS test_output_head RUNTIME DESTINATION bin)
+
+# Test WebGPU custom ops (b1_linear + rope_2d GPU vs CPU)
+add_executable(test_webgpu_ops
+    tests/c_ops/test_webgpu_ops.cpp
+)
+
+target_link_libraries(test_webgpu_ops PRIVATE ggml ggml-cpu ggml-webgpu)
+target_include_directories(test_webgpu_ops PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+install(TARGETS test_webgpu_ops RUNTIME DESTINATION bin)
+
+# Minimal test: ggml_add on WebGPU (sanity check)
+add_executable(test_webgpu_add
+    tests/c_ops/test_webgpu_add.cpp
+)
+target_link_libraries(test_webgpu_add PRIVATE ggml ggml-cpu ggml-webgpu)
+target_include_directories(test_webgpu_add PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+# Test full diffuser pipeline ops on WebGPU (GPU vs CPU)
+add_executable(test_webgpu_diffuser_ops
+    tests/c_ops/test_webgpu_diffuser_ops.cpp
+)
+target_link_libraries(test_webgpu_diffuser_ops PRIVATE ggml ggml-cpu ggml-webgpu)
+target_include_directories(test_webgpu_diffuser_ops PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp/ggml/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+install(TARGETS test_webgpu_diffuser_ops RUNTIME DESTINATION bin)
 

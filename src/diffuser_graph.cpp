@@ -123,22 +123,20 @@ static QKV split_qkv_cat(ggml_context * ctx, ggml_tensor * q_t, ggml_tensor * k_
 // C++ implementation: precompute cos[d, s] and sin[d, s] (d in [0, head_dim/2)).
 // Use a custom op to apply the 2D rotation in-place per (d, h, s) pair.
 
-static ggml_tensor * build_rope_freqs_table(ggml_context * ctx, const int * axes_dim, int n_axes, float theta) {
+RopeFreqsData compute_rope_freqs_data(const int * axes_dim, int n_axes, float theta) {
     int max_half = 0;
     for (int i = 0; i < n_axes; i++) {
         max_half = std::max(max_half, axes_dim[i] / 2);
     }
-    ggml_tensor * freqs = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, max_half, n_axes);
-    freqs->data = malloc(max_half * n_axes * sizeof(float));
-    float * data = (float *)freqs->data;
+    std::vector<float> values(max_half * n_axes, 0.0f);
     for (int a = 0; a < n_axes; a++) {
         int ax_half = axes_dim[a] / 2;
         for (int j = 0; j < ax_half; j++) {
             float scale = (float)(j * 2) / (float)axes_dim[a];
-            data[a * max_half + j] = 1.0f / powf(theta, scale);
+            values[a * max_half + j] = 1.0f / powf(theta, scale);
         }
     }
-    return freqs;
+    return {std::move(values), max_half, n_axes};
 }
 
 static void build_rope_cos_sin(
@@ -197,9 +195,9 @@ static void apply_rope_2d(
 {
     int n_heads = q->ne[1];
     int seq     = q->ne[2];
-    rope_ud.push_back({head_dim, n_heads, seq});
+    rope_ud.push_back({0x524F5045, head_dim, n_heads, seq});
     *q_out = rope_2d_fwd(ctx, q, cos_t, sin_t, rope_ud.back());
-    rope_ud.push_back({head_dim, n_heads, seq});
+    rope_ud.push_back({0x524F5045, head_dim, n_heads, seq});
     *k_out = rope_2d_fwd(ctx, k, cos_t, sin_t, rope_ud.back());
 }
 
@@ -234,6 +232,7 @@ DiffuserGraph build_diffuser_graph(
     ggml_context * ctx,
     const DiffuserParams & params,
     const DiffuserWeights & weights,
+    ggml_tensor * freqs_table,
     int img_tokens,
     int txt_tokens,
     int batch,
@@ -276,7 +275,7 @@ DiffuserGraph build_diffuser_graph(
 
     int ud_idx = 0;
     auto b1 = [&](ggml_tensor * act, const B1Weights & w) -> ggml_tensor * {
-        result.b1_ud.push_back({w.in_dim, w.out_dim});
+        result.b1_ud.push_back({0x31423142, w.in_dim, w.out_dim});
         (void)ud_idx;
         return b1_linear(ctx, act, w, n_threads, result.b1_ud.back());
     };
@@ -322,8 +321,6 @@ DiffuserGraph build_diffuser_graph(
 
     int n_axes = 4;
     int axes_dim[4] = {32, 32, 32, 32};
-
-    ggml_tensor * freqs_table = build_rope_freqs_table(ctx, axes_dim, n_axes, (float)params.theta);
 
     ggml_tensor * cos_img = nullptr;
     ggml_tensor * sin_img = nullptr;

@@ -105,9 +105,9 @@ static void apply_rope_2d(
 {
     int n_heads = q->ne[1];
     int seq     = q->ne[2];
-    rope_ud.push_back({head_dim, n_heads, seq});
+    rope_ud.push_back({0x524F5045, head_dim, n_heads, seq});
     *q_out = rope_2d_fwd(ctx, q, cos_t, sin_t, rope_ud.back());
-    rope_ud.push_back({head_dim, n_heads, seq});
+    rope_ud.push_back({0x524F5045, head_dim, n_heads, seq});
     *k_out = rope_2d_fwd(ctx, k, cos_t, sin_t, rope_ud.back());
 }
 
@@ -164,7 +164,7 @@ int main(int argc, char **argv) {
     rope_ud.reserve(8);
 
     auto b1 = [&](ggml_tensor * act, B1Weights & w) -> ggml_tensor * {
-        b1_ud.push_back({w.in_dim, w.out_dim});
+        b1_ud.push_back({0x31423142, w.in_dim, w.out_dim});
         return b1_linear(ctx, act, w, n_threads, b1_ud.back());
     };
 
