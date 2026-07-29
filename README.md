@@ -3,9 +3,15 @@
 *An ultra-lightweight, bare-metal inference engine for 1-bit diffusion models on mobile and edge devices.*
 
 > [!WARNING]
-> **🚧 Work in Progress:** This project is currently in its very early stages. It is a long-term, passion-driven project, and I am taking my time to architect and implement it properly from the ground up. The codebase is highly experimental and not yet functional. 
+> **🚫 Project on hold**
 > 
-> **🤝 Contributions are welcome!** If you're interested in mobile AI, 1-bit quantization, or squeezing every drop of performance out of Android GPUs, feel free to drop ideas, open issues, or submit PRs. I'm building this at my own pace, but I'd love to collaborate!
+> This project is currently on hold and will most likely not be resumed, for the following reasons:
+> - **Project complexity** : This project required a massive time investment to get to this stage. I had to overcome many challenges, especially recurring memory management issues.
+> - **Too niche** : This is a very specific diffusion model, and I believe the software ecosystem for on-device AI on Android isn't quite mature yet — we'll have to wait for better tool accessibility on this platform.
+> - **Spreading too thin** : I've taken on too many projects at once.
+> 
+> **🤝 Open to contributions:**
+> Even though the project is on hold, you are free to fork and reuse the code. I'd be thrilled if someone picked up my work and continued mobile support! 🙂
 
 ## Pipeline
 
